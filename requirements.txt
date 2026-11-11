@@ -1,0 +1,37 @@
+# Dipendenze pip per l'app Tessitura.
+#
+# IMPORTANTE (GPU): la versione di torch su PyPI e' solo CPU. Installare questo
+# file per primo, poi FORZARE i build CUDA (indice cu126, compatibile con
+# ctranslate2/faster-whisper che richiede le librerie CUDA 12):
+#   pip install -r requirements.txt
+#   pip install --force-reinstall --no-deps torch==2.13.0 torchaudio==2.11.0 \
+#       --index-url https://download.pytorch.org/whl/cu126
+# Serve --force-reinstall --no-deps perche' "torch==2.13.0" e' gia' "soddisfatto"
+# dal build +cpu (il suffisso +cu126 e' solo una local version): senza forzare,
+# pip non scarica il build CUDA.
+
+# --- Trascrizione ---
+faster-whisper>=1.1.0
+
+# --- Diarizzazione ---
+pyannote.audio>=4.0
+
+# --- Cattura audio (mic + WASAPI loopback su Windows) ---
+PyAudioWPatch>=0.2.12.7
+soundfile>=0.12
+sounddevice>=0.4.6
+
+# --- Riduzione rumore ---
+noisereduce>=3.0
+
+# --- GUI desktop ---
+# PySide6 e qt6-multimedia si installano via conda-forge (vedi environment.yml),
+# NON via pip: il wheel pip va in conflitto con l'ICU di conda.
+
+# --- Utility ---
+numpy
+scipy
+# Fa usare a Python lo store certificati di Windows (necessario: AVG intercetta HTTPS).
+truststore>=0.9
+# Lock interprocesso per aggiornamenti/cache e accesso esclusivo alla GPU.
+filelock>=3.13

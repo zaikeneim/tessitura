@@ -1,0 +1,20 @@
+name: tessitura
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # ffmpeg <9: pyannote 4.x legge l'audio solo via torchcodec, che carica una DLL
+  # per versione di ffmpeg (libtorchcodec_core4..8). Con ffmpeg 9 nessuna combacia
+  # e la diarizzazione muore con "torchcodec is not available".
+  - ffmpeg<9
+  # libexpat build >=1: il pyexpat di python 3.11.16 importa l'ordinale 74
+  # (XML_SetHashSalt16Bytes), assente nella build _0 pur dichiarata compatibile.
+  # Senza questo, importare pyannote/lightning da' "DLL load failed importing pyexpat".
+  - libexpat>=2.8.1
+  # PySide6 va installato da conda-forge (NON da pip): il wheel pip entra in
+  # conflitto con l'ICU dell'ambiente conda (icuuc.dll) e Qt non si carica.
+  - pyside6
+  - qt6-multimedia   # modulo QtMultimedia per il player audio
+  # Le altre dipendenze (torch CUDA, faster-whisper, pyannote, ecc.) si
+  # installano via pip dentro l'env attivato — vedi README.md.

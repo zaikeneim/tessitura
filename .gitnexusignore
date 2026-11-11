@@ -1,0 +1,12 @@
+# Generated and binary content: keep the code graph focused and reproducible.
+env/
+/models/
+/data/
+/artifacts/
+.runtimes/
+__pycache__/
+*.pyc
+*.wav
+*.mp3
+*.flac
+*.m4a

@@ -1,0 +1,145 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+ENV/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Configurazione locale; i template restano pubblicabili
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Build e installer generati
+/build/
+/dist/
+/build_config.json
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+*.whl
+
+# Artefatti locali: runtime impacchettati, report e schermate
+/artifacts/
+
+# Ambiente portabile e collegamenti generati
+env/
+.runtimes/
+.runtime*.json
+.runtime.previous.json
+.runtime-*.tmp
+.update.lock
+*.lnk
+
+# Dati e modelli (pesanti / privati)
+data/recordings/
+data/sessions/
+# Corpus di valutazione: contiene il testo integrale delle sessioni, come
+# data/sessions. Il manifest si rigenera da audio + trascrizione con
+# scripts/build_phase0_corpus.py, quindi la baseline resta riproducibile.
+data/evaluation/
+# Include anche diagnostica, file di lavoro e metadati privati dei progetti
+/data/
+/recordings/
+/sessions/
+/transcripts/
+/exports/
+tessitura-progetto.json
+/models/
+checkpoints/
+*.bin
+*.safetensors
+*.onnx
+*.ckpt
+*.pt
+*.pth
+*.gguf
+*.ggml
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.ogg
+*.opus
+*.aac
+*.aif
+*.aiff
+*.wma
+*.mp4
+*.webm
+*.srt
+*.vtt
+*.rttm
+*.stm
+
+# Token e segreti
+.hf_token
+secrets.*
+*.pfx
+*.p12
+*.pem
+*.key
+*.jks
+*.keystore
+credentials.json
+credentials.*.json
+*.credentials.json
+service-account*.json
+.git-credentials
+.netrc
+_netrc
+.pypirc
+.aws/
+.azure/
+.ssh/
+
+# Log e cache locali
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Indici e configurazioni locali degli strumenti di sviluppo
+/.gitnexus/
+/.agents/
+/.claude/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Rapporti di lavoro e strumenti legati a registrazioni private
+/docs/plans/
+/docs/baseline.md
+/docs/benchmark-results.md
+/docs/RECORDING_VALIDATION.md
+/REVIEW.md
+/REVIEW-2026-09-14.md
+/implementation_plan.md
+/scripts/apply_reference_voice_corrections.py
+/scripts/recover_reference_regions.py
+/scripts/diagnose_overlap_defect.py
+/scripts/benchmark_dicow.py
