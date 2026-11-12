@@ -275,6 +275,7 @@ class Transcriber:
         initial_prompt: str | None = None,
         quality_retries: int = 24,
         batch_size: int | None = None,
+        on_status: Callable[[str], None] | None = None,
     ) -> tuple[list[TSegment], str]:
         """Trascrive un file audio.
 
@@ -361,12 +362,15 @@ class Transcriber:
         # Retry mirato: una seconda decodifica dell'intero file è costosa e
         # tende a cambiare anche segmenti già buoni. Si ritentano solo i casi
         # degeneri, entro un limite stabile, con un po' di contesto acustico.
+        status = on_status or (lambda _message: None)
         retries_left = max(0, int(quality_retries))
+        status("Verifica segmenti sospetti" if retries_left else "Retry e recupero ASR disattivati")
         if retries_left and out:
             for index, original in sorted(
                 ((i, seg) for i, seg in enumerate(out) if _suspect(seg)),
                 key=lambda item: _quality_score(item[1]),
             )[:retries_left]:
+                status(f"Retry segmento {original.start:.1f}–{original.end:.1f} s; budget residuo {retries_left}")
                 retry = self._retry_segment(
                     audio_path,
                     original,
@@ -380,6 +384,7 @@ class Transcriber:
 
         # 2. Recupero omissioni complete da copertura vocale indipendente (Piano §6.C)
         if retries_left > 0 and total > 0.5:
+            status("Verifica copertura vocale indipendente e ricerca omissioni")
             try:
                 import numpy as np
                 from . import audio_utils
@@ -397,6 +402,7 @@ class Transcriber:
                     existing_spans = [(float(s.start), float(s.end)) for s in out]
                     planned_gaps = plan_distributed_recovery(uncovered, total, max_retries=min(6, retries_left))
                     for start_pad, end_pad, _reg in planned_gaps:
+                        status(f"Recupero omissione {start_pad:.1f}–{end_pad:.1f} s")
                         try:
                             gap_segs, _ = self._model.transcribe(
                                 str(audio_path),
@@ -457,13 +463,13 @@ class Transcriber:
                                 retries_left -= 1
                                 if retries_left <= 0:
                                     break
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            status(f"Avviso: recupero {start_pad:.1f}–{end_pad:.1f} s non riuscito: {exc}")
                         if retries_left <= 0:
                             break
                     out.sort(key=lambda s: (s.start, s.end))
-            except Exception:
-                pass
+            except Exception as exc:
+                status(f"Avviso: verifica copertura vocale non riuscita: {exc}")
 
         return out, info.language
 

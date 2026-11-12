@@ -76,6 +76,7 @@ from .workers import (
 )
 from .recording_mode_dialog import ask_recording_mode
 from .theme import icon
+from .stage_view import StageView
 
 # Lingue offerte nel menu. None = rilevamento automatico di Whisper.
 LANGUAGES: list[tuple[str, str | None]] = [
@@ -245,6 +246,15 @@ class MainWindow(QMainWindow):
         self.player = AudioPlayer()
         review.addWidget(self.player)
         review.addWidget(self.progress)
+        self.stage_view = StageView()
+        self.stage_toggle = QToolButton()
+        self.stage_toggle.setText("Fasi di elaborazione")
+        self.stage_toggle.setToolTip("Mostra o nascondi fasi, tempi e avvisi dell'ultima elaborazione")
+        self.stage_toggle.setCheckable(True)
+        self.stage_toggle.toggled.connect(self.stage_view.setVisible)
+        self.stage_toggle.hide()
+        review.addWidget(self.stage_toggle)
+        review.addWidget(self.stage_view)
         review.addWidget(self.status_label)
         body.addLayout(review, 1)
         root.addLayout(body, 1)
@@ -1103,6 +1113,10 @@ class MainWindow(QMainWindow):
             dual_channel=dual,
         )
         self._worker.progress.connect(self._on_progress)
+        self.stage_toggle.show()
+        self.stage_toggle.setChecked(True)
+        self.stage_view.begin_run()
+        self._worker.stage.connect(self.stage_view.on_stage)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished.connect(self._worker.deleteLater)
@@ -1540,6 +1554,10 @@ class MainWindow(QMainWindow):
             pending, options, parent=self, project_name=self.project.name
         )
         self._batch_worker.progress.connect(self._on_batch_progress)
+        self.stage_toggle.show()
+        self.stage_toggle.setChecked(True)
+        self.stage_view.begin_run()
+        self._batch_worker.stage.connect(self.stage_view.on_batch_stage)
         self._batch_worker.file_done.connect(self._on_batch_file_done)
         self._batch_worker.file_failed.connect(self._on_batch_file_failed)
         self._batch_worker.done.connect(self._on_batch_done)
@@ -1585,11 +1603,14 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"{prefix}File {audio.name} non riuscito: {error}")
 
     def _on_batch_done(self, completed: list[Path]) -> None:
-        self.progress.setValue(100)
+        stopped = self._batch_worker is not None and self._batch_worker.stopping
+        if not stopped:
+            self.progress.setValue(100)
         proj_name = self.project.name if self.project else ""
-        self.status_label.setText(f"{proj_name} · Coda completata: {len(completed)} file elaborati.")
+        outcome = "Coda arrestata" if stopped else "Coda completata"
+        self.status_label.setText(f"{proj_name} · {outcome}: {len(completed)} file elaborati.")
         QMessageBox.information(
-            self, "Coda completata",
+            self, outcome,
             f"Elaborati con successo {len(completed)} file nel progetto '{proj_name}'.",
         )
 

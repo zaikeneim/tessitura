@@ -9,13 +9,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QProgressBar,
                                QListWidget, QPushButton, QTextEdit, QVBoxLayout)
 
 from .audio_player import AudioPlayer
+from .stage_view import StageView
 
 
 class DiagnosticWorker(QThread):
+    stage = Signal(object)
+    progress = Signal(str, float)
     done = Signal(object)
     failed = Signal(str)
 
@@ -27,10 +30,11 @@ class DiagnosticWorker(QThread):
         try:
             if self.report is None:
                 from ..processing.long_diagnostics import diagnose_recording
-                result = diagnose_recording(self.source)
+                result = diagnose_recording(self.source, on_stage=self.stage.emit, progress=self.progress.emit)
             else:
                 from ..processing.diagnostic_experiments import run_diagnostic_experiments
-                result = run_diagnostic_experiments(self.report, count=2, model=self.model, device=self.device)
+                result = run_diagnostic_experiments(self.report, count=2, model=self.model, device=self.device,
+                                                    on_stage=self.stage.emit, progress=self.progress.emit)
             self.done.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -50,6 +54,11 @@ class DiagnosticDialog(QDialog):
         self.status = QLabel(f"{self.source.name}: analisi completa senza modificare l'originale.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        layout.addWidget(self.progress)
+        self.stage_view = StageView()
+        layout.addWidget(self.stage_view)
         self.regions = QListWidget()
         self.regions.currentRowChanged.connect(self._select_region)
         layout.addWidget(self.regions, 1)
@@ -83,12 +92,20 @@ class DiagnosticDialog(QDialog):
 
     def _start(self, report=None):
         self.compare.setEnabled(False)
+        self.progress.setValue(0)
+        self.stage_view.begin_run()
         self._worker = DiagnosticWorker(self.source, report=report, model=self.model, device=self.device, parent=self)
         self._worker.done.connect(self._done)
+        self._worker.stage.connect(self.stage_view.on_stage)
+        self._worker.progress.connect(self._on_progress)
         self._worker.failed.connect(self._failed)
         self._worker.finished.connect(self._finished)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
+
+    def _on_progress(self, message, fraction):
+        self.status.setText(message)
+        self.progress.setValue(int(fraction * 100))
 
     def _finished(self):
         self._worker = None
@@ -100,7 +117,9 @@ class DiagnosticDialog(QDialog):
         if result.name == "comparison.json":
             self._comparisons = value["results"]
             self._select_region(self.regions.currentRow())
-            self.status.setText("Confronto completato. Ascolta le varianti; più parole non dimostrano maggiore accuratezza.")
+            errors = sum("error" in item for item in self._comparisons)
+            self.status.setText(f"Confronto terminato: {errors} varianti fallite. "
+                                "Ascolta le varianti; più parole non dimostrano maggiore accuratezza.")
             return
         self.report_path, self.report = result, value
         self.regions.clear()

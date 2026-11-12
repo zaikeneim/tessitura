@@ -61,10 +61,12 @@ Write-Host "==> Building Tessitura v$NormalizedVersion (channel=$Channel, trust_
 
 # 2. Run automated tests unless skipped
 if (-not $SkipTests) {
-    Write-Host "==> Running unit test suite..." -ForegroundColor Cyan
-    & $PythonExe -m unittest discover -s tests -p "test_*.py"
+    Write-Host "==> Running the complete test suite (scripts.verify)..." -ForegroundColor Cyan
+    # scripts/verify.py is the project gate: it runs discover plus every test
+    # module as a script, so function-style modules are not silently skipped.
+    & $PythonExe -m scripts.verify
     if ($LASTEXITCODE -ne 0) {
-        throw "Unit tests failed! Aborting Windows release build."
+        throw "Test suite failed! Aborting Windows release build."
     }
 }
 

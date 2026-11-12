@@ -53,6 +53,24 @@ class PackagingAndInstallerSpecTests(unittest.TestCase):
         self.assertIn("SHA256SUMS.txt", content)
         self.assertIn("Tessitura-Setup-", content)
 
+    def test_release_jobs_install_gui_and_require_the_complete_gate(self) -> None:
+        import yaml
+
+        workflow = self.project_root / ".github" / "workflows" / "release-windows.yml"
+        jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
+        for name in ("verify", "build-windows"):
+            with self.subTest(job=name):
+                commands = "\n".join(step.get("run", "") for step in jobs[name]["steps"])
+                self.assertRegex(commands, r"(?m)^\s*(?:python -m )?pip install [^\n]*PySide6")
+                self.assertFalse(jobs[name].get("continue-on-error", False))
+        checks = jobs["verify"]["steps"]
+        gate = next(step for step in checks if "python -m scripts.verify" in step.get("run", ""))
+        self.assertIn("python -m scripts.verify", gate["run"].splitlines())
+        self.assertNotIn("--full", gate["run"])
+        self.assertFalse(gate.get("continue-on-error", False))
+        self.assertEqual(jobs["build-windows"]["needs"], "verify")
+        self.assertIn("build-windows", jobs["publish-release"]["needs"])
+
     def test_app_cli_version_and_smoke_test_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

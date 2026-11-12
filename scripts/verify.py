@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -57,19 +58,25 @@ def main() -> int:
 
     steps: list[list[str]] = [["-m", "unittest", "discover", "-s", "tests"]]
     steps += [["-m", module] for module in _modules()]
-    if args.full:
-        steps.append(["scripts/check_env.py"])
-        steps.append(["scripts/runtime_health.py", "verify"])
-
     failures: list[tuple[str, str]] = []
-    for step in steps:
-        label = " ".join(step)
-        name, ok, elapsed, output = _run(label, step)
-        print(f"[{'OK  ' if ok else 'FAIL'}] {name}  ({elapsed:.1f}s)", flush=True)
-        if args.verbose or not ok:
-            print(output)
-        if not ok:
-            failures.append((name, output))
+    with tempfile.TemporaryDirectory(prefix="tessitura-verify-") as folder:
+        if args.full:
+            baseline = str(Path(folder) / "runtime-baseline.json")
+            steps.append(["scripts/check_env.py"])
+            # Match runtime_health's CLI and compare the environment before
+            # its offline model/decoder/Qt smoke test. Keep this transient
+            # snapshot separate from any saved update or accuracy baseline.
+            steps.append(["scripts/runtime_health.py", "--snapshot", baseline])
+            steps.append(["scripts/runtime_health.py", "--verify", baseline])
+
+        for step in steps:
+            label = " ".join(step)
+            name, ok, elapsed, output = _run(label, step)
+            print(f"[{'OK  ' if ok else 'FAIL'}] {name}  ({elapsed:.1f}s)", flush=True)
+            if args.verbose or not ok:
+                print(output)
+            if not ok:
+                failures.append((name, output))
 
     print()
     if failures:

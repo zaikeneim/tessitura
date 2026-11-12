@@ -37,13 +37,26 @@ def activity_spans(turns):
     return result
 
 
-def reconstruct_events(tsegments, ordinary_turns, exclusive_turns=(), *, source_audio_ref=None, asr_model=None):
-    """Keep every ASR word; annotate uncertain attribution without forced smoothing."""
+def reconstruct_events(tsegments, ordinary_turns, exclusive_turns=(), *, source_audio_ref=None, asr_model=None,
+                       word_labels=None):
+    """Keep every ASR word; annotate uncertain attribution without forced smoothing.
+
+    ``word_labels`` (optional) carries one reviewed speaker label per word, in
+    ``flatten_words`` order, as produced by ``merge.assign_speakers`` and
+    ``transcript_review.review_labels``. When given, that label is the event
+    speaker; ordinary activity still decides ``uncertain`` and the candidate
+    list, so overlapping speech and attributions without acoustic support stay
+    visible instead of being silently accepted. Without labels the speaker
+    comes from ordinary activity alone and mixed words remain unassigned.
+    """
     spans = activity_spans(ordinary_turns)
     units = flatten_words(tsegments)
+    if word_labels is not None and len(word_labels) != len(units):
+        raise ValueError(f"word_labels ({len(word_labels)}) and words ({len(units)}) do not match")
     events = []
     current = None
     current_signature = None
+    activity: dict[str, float] = {}
     cursor = 0
     for index, unit in enumerate(units):
         while cursor < len(spans) and spans[cursor]["end_s"] <= unit.start:
@@ -57,25 +70,43 @@ def reconstruct_events(tsegments, ordinary_turns, exclusive_turns=(), *, source_
                 for speaker in span["speakers"]:
                     candidates[speaker] += duration
                 overlapping |= span["overlap"]
-        speaker = next(iter(candidates)) if len(candidates) == 1 and not overlapping else None
-        uncertain = speaker is None
+        if word_labels is None:
+            speaker = next(iter(candidates)) if len(candidates) == 1 and not overlapping else None
+            uncertain = speaker is None
+            assignment = "unresolved_mixture" if uncertain else "single_active_speaker"
+        else:
+            speaker = word_labels[index]
+            supported = speaker in candidates
+            uncertain = overlapping or not supported
+            assignment = ("reviewed_label_in_overlap" if overlapping
+                          else "reviewed_label_supported" if supported
+                          else "reviewed_label_without_activity")
         state = "attribution_uncertain" if uncertain else "predicted"
         signature = tuple(sorted(candidates))
+        # Reviewed labels already decide where a phrase changes voice: splitting
+        # on every change of the candidate set would fragment phrases again.
         if (current is None or current.speaker_id != speaker or current.uncertain != uncertain
-                or signature != current_signature or unit.start - current.end_s > 1.5 or unit.start < current.end_s - .05):
-            current = Utterance(start_s=unit.start, end_s=max(unit.end, unit.start),
+                or (word_labels is None and signature != current_signature)
+                or unit.start - current.end_s > 1.5 or unit.start < current.end_s - .05):
+            # A zero-length ASR word (Whisper emits them at chunk starts) must
+            # not produce a zero-length event: the timeline editor rejects
+            # intervals with start >= end, so the event could never be corrected.
+            current = Utterance(start_s=unit.start, end_s=max(unit.end, unit.start + .001),
                 utterance_id=uuid.uuid5(uuid.NAMESPACE_URL, f"word-event:{source_audio_ref}:{index}:{unit.start}:{unit.text}").hex,
                 speaker=speaker, text="", source_audio_ref=source_audio_ref, uncertain=uncertain,
                 processing_state=state, asr_provenance={"model": asr_model, "origin": "aligned_asr", "word_indices": []},
                 diarization_provenance={"source": "ordinary_activity", "exclusive_available": bool(exclusive_turns),
-                    "assignment": "unresolved_mixture" if uncertain else "single_active_speaker"})
+                    "assignment": assignment, "reviewed_labels": word_labels is not None})
             events.append(current)
             current_signature = signature
+            activity = {}
         current.words.append(Word(unit.start, unit.end, unit.text, unit.prob))
         current.text = " ".join(w.text.strip() for w in current.words)
         current.end_s = max(current.end_s, unit.end)
         current.asr_provenance["word_indices"].append(index)
-        current.candidate_speakers = [{"speaker": s, "activity_seconds": round(v, 5)} for s, v in candidates.items()]
+        for candidate, seconds in candidates.items():
+            activity[candidate] = activity.get(candidate, 0.0) + seconds
+        current.candidate_speakers = [{"speaker": s, "activity_seconds": round(v, 5)} for s, v in activity.items()]
         current.original_prediction = {"start_s": current.start_s, "end_s": current.end_s,
                                        "speaker": current.speaker, "text": current.text,
                                        "words": [asdict(w) for w in current.words]}

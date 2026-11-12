@@ -83,21 +83,28 @@ def _to_turns(annotation) -> list[Turn]:
 
 
 def _overlapping_spans(turns: list[Turn]) -> list[tuple[float, float]]:
-    """Intervalli coperti da almeno due voci diverse."""
-    events: list[tuple[float, int]] = []
+    """Intervalli coperti da almeno due voci *diverse*.
+
+    Si contano le voci attive, non gli intervalli: due turni della stessa voce
+    che si accavallano (annotazioni duplicate o frammentate) non sono parlato
+    simultaneo. Le fini vengono elaborate prima degli inizi allo stesso istante,
+    quindi due turni adiacenti non producono sovrapposizione.
+    """
+    events: list[tuple[float, int, str]] = []
     for turn in turns:
-        events.append((turn.start, 1))
-        events.append((turn.end, -1))
-    events.sort()
+        events.append((turn.start, 1, turn.speaker))
+        events.append((turn.end, -1, turn.speaker))
+    events.sort(key=lambda item: (item[0], item[1]))
     spans: list[tuple[float, float]] = []
-    active = 0
+    active: dict[str, int] = {}
     opened: float | None = None
-    for time, delta in events:
-        was_overlapping = active >= 2
-        active += delta
-        if active >= 2 and not was_overlapping:
+    for time, delta, speaker in events:
+        was_overlapping = sum(1 for count in active.values() if count > 0) >= 2
+        active[speaker] = active.get(speaker, 0) + delta
+        overlapping = sum(1 for count in active.values() if count > 0) >= 2
+        if overlapping and not was_overlapping:
             opened = time
-        elif active < 2 and was_overlapping and opened is not None:
+        elif not overlapping and was_overlapping and opened is not None:
             if time > opened:
                 spans.append((opened, time))
             opened = None

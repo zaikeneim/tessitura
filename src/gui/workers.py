@@ -71,6 +71,7 @@ class ProcessWorker(QThread):
     """Esegue la pipeline (denoise/trascrizione/diarizzazione) fuori dal thread UI."""
 
     progress = Signal(str, float)  # messaggio, frazione 0..1
+    stage = Signal(object)
     done = Signal(object)          # Session
     failed = Signal(str)
 
@@ -92,6 +93,7 @@ class ProcessWorker(QThread):
                 offsets_s=self._offsets or None,
                 dual_channel=self._dual,
                 progress=lambda msg, frac: self.progress.emit(msg, frac),
+                on_stage=self.stage.emit,
             )
             self.done.emit(session)
         except Exception as exc:  # noqa: BLE001 - lo mostriamo nella UI
@@ -143,6 +145,7 @@ class BatchProcessWorker(QThread):
     """
 
     progress = Signal(str, float)   # messaggio, frazione complessiva 0..1
+    stage = Signal(str, object)     # file corrente, StageEvent
     file_done = Signal(object, object)   # percorso audio, Session
     file_failed = Signal(object, str)    # percorso audio, errore
     done = Signal(object)                # elenco dei percorsi elaborati
@@ -182,6 +185,7 @@ class BatchProcessWorker(QThread):
                     session = process_recording(
                         audio, None, options=self._options,
                         session_name=audio.stem, progress=report,
+                        on_stage=lambda event, label=label: self.stage.emit(label, event),
                     )
                 except Exception as exc:  # noqa: BLE001
                     # Un file illeggibile non deve fermare la coda: si segnala e

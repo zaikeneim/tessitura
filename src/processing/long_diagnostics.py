@@ -23,6 +23,7 @@ import soundfile as sf
 
 from .. import paths
 from .checkpoints import file_digest
+from .progress import StageReporter
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ def _cached_overlap(rows: list[dict], start: float, end: float) -> bool:
     return False
 
 
-def _scan(source: Path, decoded: Path, segments: list[dict], options: DiagnosticOptions) -> dict:
+def _scan(source: Path, decoded: Path, segments: list[dict], options: DiagnosticOptions, on_progress=None) -> dict:
     """Read every frame using bounded memory and retain native channel samples."""
     windows, decode_errors = [], []
     with sf.SoundFile(source) as reader:
@@ -196,6 +197,8 @@ def _scan(source: Path, decoded: Path, segments: list[dict], options: Diagnostic
                     if channels == 2:
                         products += float(np.dot(block[:, 0].astype(np.float64), block[:, 1]))
                     count += len(block)
+                    if on_progress:
+                        on_progress(count, reader.frames)
             except (RuntimeError, ValueError, OSError) as exc:
                 decode_errors.append({"at_s": count / rate, "error": str(exc)})
         if count != reader.frames:
@@ -284,74 +287,97 @@ def select_benchmark_regions(timeline: list[dict], segments: list[dict], duratio
 
 def diagnose_recording(source: str | Path, *, output_dir: str | Path | None = None,
                        session_path: str | Path | None = None,
-                       options: DiagnosticOptions | None = None) -> Path:
+                       options: DiagnosticOptions | None = None, progress=None, on_stage=None) -> Path:
     """Scan an entire recording and export lossless samples and a review manifest."""
-    start_time = time.perf_counter()
-    source = Path(source).resolve(strict=True)
-    options = options or DiagnosticOptions()
-    options.validate()
-    source_hash = file_digest(source)
-    session = Path(session_path).resolve(strict=True) if session_path else find_cached_session(source)
-    baseline_hash = file_digest(session) if session else None
-    config = {"version": 1, "options": asdict(options), "source_sha256": source_hash,
-              "cached_session_sha256": baseline_hash}
-    key = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
-    root = Path(output_dir).resolve() if output_dir else paths.cache_dir() / "diagnostics" / key[:20]
-    if root == source.parent or source == root or source in root.parents:
-        raise ValueError("Diagnostic output must be separate from source audio")
-    install_root = paths.app_root().resolve()
-    if paths.is_installed_mode() and (root == install_root or install_root in root.parents):
-        raise ValueError("Diagnostic artifacts must be outside the installation directory")
-    root.mkdir(parents=True, exist_ok=True)
-    report_path = root / "report.json"
-    decoded = root / "decoded-original.wav"
-    if report_path.is_file():
-        cached = json.loads(report_path.read_text(encoding="utf-8"))
-        if (cached.get("configuration") == config and decoded.is_file()
-                and (root / "timeline.json").is_file() and (root / "reference-review.json").is_file()
-                and all((root / r["audio_file"]).is_file() for r in cached.get("regions", []))):
-            try:
-                if sf.info(decoded).frames == cached["scan"]["decoded_frames"]:
-                    return report_path
-            except (OSError, RuntimeError, KeyError):
-                pass
-    segments = _cached_segments(session)
-    pending_decode = root / "decoded-original.tmp.wav"
-    scan = _scan(source, pending_decode, segments, options)
-    os.replace(pending_decode, decoded)
-    regions = select_benchmark_regions(scan["timeline"], segments, scan["decoded_duration_s"], options)
-    with sf.SoundFile(decoded) as reader:
-        for region in regions:
-            left = round(region["context_start_s"] * reader.samplerate)
-            right = round(region["context_end_s"] * reader.samplerate)
-            reader.seek(left)
-            samples = reader.read(right - left, dtype="float32", always_2d=True)
-            region["audio_file"] = region["region_id"] + ".wav"
-            region["sample_origin_s"] = left / reader.samplerate
-            sf.write(root / region["audio_file"], samples, reader.samplerate, subtype="FLOAT")
-    timeline = scan.pop("timeline")
-    _write_json(root / "timeline.json", timeline)
-    report = {"schema_version": 1, "source": str(source), "source_sha256": source_hash,
-              "configuration": config, "metadata": _probe(source), "scan": scan,
-              "cached_session": str(session) if session else None,
-              "cached_session_association": ("explicit_session_unverified_source_hash" if session_path
-                                             else "filename_match_unverified_source_hash") if session else None,
-              "decoded_audio": str(decoded), "timeline": "timeline.json", "regions": regions,
-              "runtime_s": time.perf_counter() - start_time,
-              "quality_metrics": None,
-              "limitations": [
-                  "Energy marks signal activity, not verified speech or speaker count.",
-                  "Cached ASR, speaker changes, and overlaps are model predictions, not ground truth.",
-                  "Missing cached text and level discontinuities require listening; noise and natural pauses can trigger them.",
-                  "An imported MP3 cannot establish capture topology or recover speech removed before encoding.",
-                  "No WER or DER is valid until a human verifies the reference text and speaker timing.",
-              ]}
-    _write_json(root / "reference-review.json", {
-        "source_sha256": source_hash, "verification_level": "unverified_candidate",
-        "instructions": "Correct turns against original playback. Keep overlapping turns and absolute timestamps. "
-                        "Mark human_verified_text or human_verified_timing_and_speakers only after review.",
-        "regions": [{"region_id": r["region_id"], "start_s": r["start_s"], "end_s": r["end_s"],
-                     **r["reference"]} for r in regions],
-    })
-    _write_json(report_path, report)
-    return report_path
+    stages = StageReporter([
+        ("inspect", "Verifica sorgente e cache"), ("scan", "Scansione audio completa"),
+        ("select", "Selezione campioni"), ("samples", "Estrazione campioni originali"),
+        ("report", "Salvataggio rapporto e riferimento"),
+    ], progress, on_stage)
+    with stages.guard():
+        stages.start("inspect")
+        start_time = time.perf_counter()
+        source = Path(source).resolve(strict=True)
+        options = options or DiagnosticOptions()
+        options.validate()
+        source_hash = file_digest(source)
+        session = Path(session_path).resolve(strict=True) if session_path else find_cached_session(source)
+        baseline_hash = file_digest(session) if session else None
+        config = {"version": 1, "options": asdict(options), "source_sha256": source_hash,
+                  "cached_session_sha256": baseline_hash}
+        key = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        root = Path(output_dir).resolve() if output_dir else paths.cache_dir() / "diagnostics" / key[:20]
+        if root == source.parent or source == root or source in root.parents:
+            raise ValueError("Diagnostic output must be separate from source audio")
+        install_root = paths.app_root().resolve()
+        if paths.is_installed_mode() and (root == install_root or install_root in root.parents):
+            raise ValueError("Diagnostic artifacts must be outside the installation directory")
+        root.mkdir(parents=True, exist_ok=True)
+        report_path = root / "report.json"
+        decoded = root / "decoded-original.wav"
+        if report_path.is_file():
+            cached = json.loads(report_path.read_text(encoding="utf-8"))
+            if (cached.get("configuration") == config and decoded.is_file()
+                    and (root / "timeline.json").is_file() and (root / "reference-review.json").is_file()
+                    and all((root / r["audio_file"]).is_file() for r in cached.get("regions", []))):
+                try:
+                    if sf.info(decoded).frames == cached["scan"]["decoded_frames"]:
+                        stages.complete("inspect", "Rapporto in cache verificato")
+                        for stage_id in ("scan", "select", "samples", "report"):
+                            stages.skip(stage_id, "Risultati già presenti nella cache verificata")
+                        stages.assert_complete()
+                        return report_path
+                except (OSError, RuntimeError, KeyError):
+                    pass
+        segments = _cached_segments(session)
+        pending_decode = root / "decoded-original.tmp.wav"
+        stages.complete("inspect")
+        stages.start("scan")
+        scan = _scan(source, pending_decode, segments, options, on_progress=lambda done, total: stages.update(
+            "scan", done / total if total else None, f"{done} / {total} frame decodificati"))
+        stages.complete("scan", warning=str(scan["decode_errors"]) if scan["decode_errors"] else None)
+        os.replace(pending_decode, decoded)
+        stages.start("select")
+        regions = select_benchmark_regions(scan["timeline"], segments, scan["decoded_duration_s"], options)
+        stages.complete("select")
+        stages.start("samples")
+        with sf.SoundFile(decoded) as reader:
+            for region_index, region in enumerate(regions):
+                left = round(region["context_start_s"] * reader.samplerate)
+                right = round(region["context_end_s"] * reader.samplerate)
+                reader.seek(left)
+                samples = reader.read(right - left, dtype="float32", always_2d=True)
+                region["audio_file"] = region["region_id"] + ".wav"
+                region["sample_origin_s"] = left / reader.samplerate
+                sf.write(root / region["audio_file"], samples, reader.samplerate, subtype="FLOAT")
+                stages.update("samples", (region_index + 1) / len(regions), region["region_id"])
+        stages.complete("samples")
+        stages.start("report")
+        timeline = scan.pop("timeline")
+        _write_json(root / "timeline.json", timeline)
+        report = {"schema_version": 1, "source": str(source), "source_sha256": source_hash,
+                  "configuration": config, "metadata": _probe(source), "scan": scan,
+                  "cached_session": str(session) if session else None,
+                  "cached_session_association": ("explicit_session_unverified_source_hash" if session_path
+                                                 else "filename_match_unverified_source_hash") if session else None,
+                  "decoded_audio": str(decoded), "timeline": "timeline.json", "regions": regions,
+                  "runtime_s": time.perf_counter() - start_time,
+                  "quality_metrics": None,
+                  "limitations": [
+                      "Energy marks signal activity, not verified speech or speaker count.",
+                      "Cached ASR, speaker changes, and overlaps are model predictions, not ground truth.",
+                      "Missing cached text and level discontinuities require listening; noise and natural pauses can trigger them.",
+                      "An imported MP3 cannot establish capture topology or recover speech removed before encoding.",
+                      "No WER or DER is valid until a human verifies the reference text and speaker timing.",
+                  ]}
+        _write_json(root / "reference-review.json", {
+            "source_sha256": source_hash, "verification_level": "unverified_candidate",
+            "instructions": "Correct turns against original playback. Keep overlapping turns and absolute timestamps. "
+                            "Mark human_verified_text or human_verified_timing_and_speakers only after review.",
+            "regions": [{"region_id": r["region_id"], "start_s": r["start_s"], "end_s": r["end_s"],
+                         **r["reference"]} for r in regions],
+        })
+        _write_json(report_path, report)
+        stages.complete("report")
+        stages.assert_complete()
+        return report_path

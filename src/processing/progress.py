@@ -136,3 +136,94 @@ class StageReporter:
         unfinished = [key for key, row in self._rows.items() if row["status"] not in ("completed", "skipped")]
         if unfinished:
             raise RuntimeError("Processing stages unfinished: " + ", ".join(unfinished))
+
+    @contextmanager
+    def guard(self):
+        """Keep failures visible without changing the operation's exception."""
+        try:
+            yield self
+        except BaseException as exc:
+            self.fail_running(exc)
+            raise
+
+    def asr_progress(self, stage_id):
+        def report(done, total):
+            self.update(stage_id, done / total if total > 0 else None,
+                        f"{done:.1f} / {total:.1f} s; poi verifica e recupero ASR")
+        return report
+
+    def asr_status(self, stage_id):
+        def report(message):
+            # Decoder seconds cannot measure the remaining retry/recovery work.
+            row = self._row(stage_id)
+            if row["status"] != "running":
+                return
+            row["fraction"] = None
+            if message.startswith("Avviso: "):
+                previous = row["warning"]
+                row["warning"] = f"{previous}; {message}" if previous else message
+            self.update(stage_id, detail=message)
+        return report
+
+    def transcribed(self, stage_id):
+        return self.complete(stage_id, warning=self._row(stage_id)["warning"])
+
+    def note(self, message, _legacy_fraction=None):
+        running = [key for key, row in self._rows.items() if row["status"] == "running"]
+        if running:
+            self.update(running[-1], detail=message)
+
+    def diarization_progress(self, stage_id):
+        def report(step, fraction):
+            # A pyannote substep is not a measured fraction of the whole model.
+            detail = str(step) + (f" ({fraction:.0%})" if fraction is not None else "")
+            self.update(stage_id, detail=detail)
+        return report
+
+    def aligned(self, stage_id, report):
+        value = report.to_dict() if report is not None else {}
+        warning = value.get("fallback_reason") or value.get("error") or "; ".join(value.get("notes", []))
+        self.complete(stage_id, detail=str(value.get("used_backend", value.get("backend", ""))),
+                      warning=str(warning) if warning else None)
+
+
+SOURCE_STAGES = [
+    ("source_denoise", "Riduzione rumore sorgenti"),
+    ("echo", "Verifica eco"), ("asr_model", "Caricamento modello ASR"),
+    ("mic_asr", "Trascrizione microfono e recupero ASR"),
+    ("system_asr", "Trascrizione sistema e recupero ASR"),
+    ("mic_alignment", "Allineamento parole microfono"),
+    ("mic_diarization", "Diarizzazione microfono"),
+    ("system_alignment", "Allineamento parole sistema"),
+    ("system_diarization", "Diarizzazione sistema"),
+    ("source_merge", "Ricomposizione sorgenti e sovrapposizioni"),
+]
+
+
+def recording_stages(options, *, source=None):
+    """Plan actual branch order before expensive processing starts."""
+    if source is None:
+        source = (options.strategy in ("source_aware", "source_single_speaker")
+                  or options.recording_mode in ("headset", "speakers"))
+    rows = [("validate", "Validazione profilo e sorgenti"), ("prepare", "Preparazione e sincronizzazione audio")]
+    if source:
+        rows += SOURCE_STAGES
+    else:
+        isolated = options.strategy == "speaker_isolated"
+        if isolated:
+            rows += [("separation", "Separazione voci")]
+        rows += [("denoise", "Riduzione rumore")]
+        diar = [("diarization", "Diarizzazione: chi parla quando"), ("profiles", "Profili vocali")]
+        if options.diarize and options.profile_first:
+            rows += diar
+        if not isolated:
+            rows += [("separation", "Separazione voci")]
+        elif options.diarize and options.profile_first:
+            rows += [("profile_separation", "Estrazione voci dai turni rilevati")]
+        rows += [("asr", "Trascrizione e recupero ASR"),
+                 ("alignment", "Allineamento parole")]
+        if not (options.diarize and options.profile_first):
+            rows += diar
+        rows += [("merge", "Attribuzione parole e voci"), ("review", "Revisione deterministica"),
+                 ("reconstruct", "Ricostruzione eventi e sovrapposizioni")]
+    return rows + [("finalize", "Sessione e risultati intermedi")]

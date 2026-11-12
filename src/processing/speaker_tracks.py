@@ -192,6 +192,7 @@ def transcribe_speaker_tracks(
     options: Any | None = None,
     progress: Callable[[str, float], None] | None = None,
     work_dir: Path | None = None,
+    stages=None,
 ) -> tuple[list[Utterance], list[Segment], str, dict]:
     """Trascrive ogni traccia separata e ricompone gli interventi per parlante."""
     if not result.separated:
@@ -209,6 +210,8 @@ def transcribe_speaker_tracks(
     if getattr(opts, "compute_type", None):
         resolved_compute = opts.compute_type
 
+    if stages:
+        stages.start("asr")
     report("Caricamento modello ASR...", 0.55)
     transcriber = Transcriber(
         model_size=getattr(opts, "model_size", "large-v3"),
@@ -247,6 +250,10 @@ def transcribe_speaker_tracks(
                 vad_filter=True,
                 initial_prompt=initial_prompt,
                 quality_retries=quality_retries,
+                on_progress=(lambda done, total, i=index: stages.update(
+                    "asr", (i + done / total) / len(result.tracks) if total else None,
+                    f"Voce {i + 1}/{len(result.tracks)}: {done:.1f}/{total:.1f} s")) if stages else None,
+                on_status=stages.asr_status("asr") if stages else None,
             )
             if language_code:
                 detected_languages.append(language_code)
@@ -254,7 +261,10 @@ def transcribe_speaker_tracks(
     finally:
         transcriber.close()
 
-    for speaker, track_path, transcribed, language_code in raw_tracks:
+    if stages:
+        stages.transcribed("asr")
+        stages.start("alignment")
+    for track_index, (speaker, track_path, transcribed, language_code) in enumerate(raw_tracks):
         transcribed, align_report = align_segments(
             transcribed,
             track_path,
@@ -263,6 +273,8 @@ def transcribe_speaker_tracks(
             device=resolved_device,
         )
         alignment_reports[speaker] = align_report.to_dict()
+        if stages:
+            stages.update("alignment", (track_index + 1) / len(raw_tracks), f"Voce {speaker}")
         count = 0
         for piece in transcribed:
             text = piece.text.strip()
@@ -285,8 +297,17 @@ def transcribe_speaker_tracks(
 
     from .merge import build_utterances_from_segments, utterances_to_segments
 
+    if stages:
+        stages.complete("alignment")
+        stages.start("merge")
     utterances = build_utterances_from_segments(segments)
+    if stages:
+        stages.complete("merge")
+        stages.skip("review", "Attribuzione dalla traccia separata; revisione standard non prevista")
+        stages.start("reconstruct")
     projected = utterances_to_segments(utterances)
+    if stages:
+        stages.complete("reconstruct")
     detected_language = detected_languages[0] if detected_languages else ""
 
     metadata = {

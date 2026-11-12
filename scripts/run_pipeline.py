@@ -39,8 +39,6 @@ def main() -> int:
                         help="nomi/termini da fornire come glossario a Whisper")
     parser.add_argument("--speakers", type=int, default=0, help="numero voci (0 = auto)")
     parser.add_argument("--no-denoise", action="store_true")
-    parser.add_argument("--speakers", type=int, default=0, help="numero voci (0 = auto)")
-    parser.add_argument("--no-denoise", action="store_true")
     parser.add_argument("--denoise-strength", type=float, default=0.5,
                         help="0..1, quanto rumore togliere (>0.6 inizia a mangiare voce)")
     parser.add_argument("--quality-retries", type=int, default=24,

@@ -76,7 +76,10 @@ class DiagnosticUITests(unittest.TestCase):
         worker.failed.connect(errors.append)
         with patch("src.processing.long_diagnostics.diagnose_recording", return_value=Path("report.json")) as scan:
             worker.run()
-        scan.assert_called_once_with("original.mp3")
+        scan.assert_called_once()
+        self.assertEqual(scan.call_args.args, ("original.mp3",))
+        self.assertTrue(callable(scan.call_args.kwargs["on_stage"]))
+        self.assertTrue(callable(scan.call_args.kwargs["progress"]))
         self.assertEqual(results, [Path("report.json")])
         with patch("src.processing.long_diagnostics.diagnose_recording", side_effect=OSError("decode failed")):
             worker.run()
