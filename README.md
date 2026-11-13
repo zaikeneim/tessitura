@@ -120,15 +120,19 @@ pip install --force-reinstall --no-deps torch==2.13.0 torchaudio==2.11.0 `
 > `conda config --set ssl_verify truststore` (lo fa gia' `setup.ps1`).
 > A runtime ci pensa `src/bootstrap.py` (pacchetto `truststore`).
 
-### Token HuggingFace (per la diarizzazione)
-La diarizzazione usa `pyannote.audio`, che richiede un account HuggingFace gratuito:
+### Token Hugging Face (per la diarizzazione)
+La diarizzazione usa `pyannote.audio`. Il primo download del modello
+`pyannote/speaker-diarization-community-1` richiede un account Hugging Face gratuito;
+dopo, il modello resta in cache e il token non serve più.
 1. Crea un account su https://huggingface.co
 2. Accetta le condizioni del modello `pyannote/speaker-diarization-community-1`
-   (pyannote.audio 4.x usa questo modello all-in-one)
-3. Crea un token in Settings -> Access Tokens
-4. Salva il token nel file `.hf_token` nella root del progetto (gia' in .gitignore),
-   oppure nella cartella dati, oppure nella tua home. In alternativa imposta la
-   variabile d'ambiente `HF_TOKEN`.
+3. Crea un token di tipo «Read» su https://huggingface.co/settings/tokens
+4. In Tessitura apri **Impostazioni → Hugging Face…**, incolla il token, poi
+   **Salva token** e **Verifica connessione**. Il token va nel Gestore credenziali
+   di Windows, mai in un file.
+
+In alternativa imposta la variabile d'ambiente `HF_TOKEN`, che ha la precedenza
+sul token salvato. Dettagli, ordine di precedenza ed errori: [docs/HUGGING_FACE.md](docs/HUGGING_FACE.md).
 
 ## Avvio
 

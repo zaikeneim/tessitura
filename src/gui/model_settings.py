@@ -65,15 +65,16 @@ class ModelDownloadWorker(QThread):
             def on_download(name: str, pct: int) -> None:
                 self.progress.emit(f"Scaricamento {name}: {pct}%")
 
-            from ..processing.model_store import ensure
-            token = None
             if self._entry.category == "diarizzazione":
-                from ..processing.diarize import read_hf_token
-                token = read_hf_token()
-            # The same transactional store is used by all model families:
-            # validate the whole snapshot before the GUI reports success.
-            ensure(self._entry.repo, self._entry.category,
-                   on_download=on_download, token=token)
+                # Access checks, checksums, load test and activation: a
+                # commit-pinned snapshot is otherwise invisible to the diarizer.
+                from ..processing.hf_access import ensure_model
+                ensure_model(self._entry.repo, on_download=on_download)
+            else:
+                from ..processing.model_store import ensure
+                # The same transactional store is used by all model families:
+                # validate the whole snapshot before the GUI reports success.
+                ensure(self._entry.repo, self._entry.category, on_download=on_download)
             self.done.emit(None)
         except Exception as exc:  # noqa: BLE001 - la cache esistente resta intatta
             self.done.emit(exc)
@@ -128,6 +129,9 @@ class ModelSettingsDialog(QDialog):
         self.diarization_combo.setEnabled(False)
         self.tabs.addTab(transcription_page, "Trascrizione")
         self.tabs.addTab(diarization_page, "Diarizzazione")
+        from .hf_settings import HuggingFaceSettingsWidget
+        self.hf_settings = HuggingFaceSettingsWidget(parent=self)
+        self.tabs.addTab(self.hf_settings, "Hugging Face")
         self.active_info = QLabel()
         self.active_info.setObjectName("modelSummary")
         self.active_info.setWordWrap(True)
@@ -216,11 +220,14 @@ class ModelSettingsDialog(QDialog):
         self.status_label.setText("Catalogo aggiornato.")
 
     def _selected_entry(self) -> ModelEntry | None:
-        category = ("trascrizione", "diarizzazione")[self.tabs.currentIndex()]
+        index = self.tabs.currentIndex()
+        if index not in (0, 1):  # scheda Hugging Face: nessun modello selezionato
+            return None
+        category = ("trascrizione", "diarizzazione")[index]
         key = (
             self.transcription_combo.currentData(),
             self.diarization_combo.currentData(),
-        )[self.tabs.currentIndex()]
+        )[index]
         return next((entry for entry in self._entries[category] if entry.key == key), None)
 
     def _update_active_info(self, *_args) -> None:
@@ -292,8 +299,9 @@ class ModelSettingsDialog(QDialog):
 
     def _busy(self) -> bool:
         """Un worker sui modelli e' ancora vivo."""
-        return any(worker is not None and worker.isRunning()
-                   for worker in (self._worker, self._download_worker))
+        return self.hf_settings.busy() or any(
+            worker is not None and worker.isRunning()
+            for worker in (self._worker, self._download_worker))
 
     def done(self, result: int) -> None:
         """Unico passaggio per accept(), reject(), Escape e pulsanti.

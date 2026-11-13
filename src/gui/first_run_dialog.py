@@ -22,6 +22,8 @@ from src.processing.first_run import (
     configure_user_directories,
 )
 from src.hardware import Hardware
+from src.processing.hf_access import redact
+from src.secure_store import CredentialStoreError
 
 
 class FirstRunDialog(QDialog):
@@ -90,7 +92,9 @@ class FirstRunDialog(QDialog):
 
         hf_lbl = QLabel(
             "Token Hugging Face (opzionale, richiesto solo per scaricare per la prima volta "
-            "il modello di diarizzazione pyannote/speaker-diarization-community-1):"
+            "il modello di diarizzazione pyannote/speaker-diarization-community-1). "
+            "Viene salvato nel Gestore credenziali del sistema; si gestisce poi da "
+            "Impostazioni → Hugging Face:"
         )
         hf_lbl.setWordWrap(True)
         dir_layout.addWidget(hf_lbl)
@@ -176,6 +180,12 @@ class FirstRunDialog(QDialog):
                 f"Impossibile configurare le cartelle selezionate:\n{exc}",
             )
             return False
+        except (ValueError, CredentialStoreError) as exc:
+            # Il token viene validato e salvato prima delle cartelle: nulla e' cambiato.
+            QMessageBox.warning(self, "Token Hugging Face", redact(str(exc), token))
+            return False
+        finally:
+            token = None
 
     def _on_defer(self) -> None:
         if self._apply_configuration():

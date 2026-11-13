@@ -47,6 +47,7 @@ from ..processing.audio_profile import AudioProfile
 from ..processing.pipeline import PipelineOptions
 from .audio_player import AudioPlayer
 from .first_run_dialog import FirstRunDialog
+from .hf_settings import HuggingFaceDialog, ensure_diarization_model
 from .model_settings import ModelSettingsDialog
 from .update_dialog import UpdateDialog
 from ..update_manager import ActiveOperationState, UpdateManager
@@ -684,6 +685,9 @@ class MainWindow(QMainWindow):
         self.model_settings_action = settings_menu.addAction(
             "Modelli e motori…", self._open_model_settings
         )
+        self.hf_settings_action = settings_menu.addAction(
+            "Hugging Face…", self._open_hf_settings
+        )
         self.first_run_action = settings_menu.addAction(
             "Cartelle dati e configurazione iniziale…", self._open_first_run_dialog
         )
@@ -1091,7 +1095,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Combinazione non riuscita.")
         QMessageBox.critical(self, "Combina audio", message)
 
-    def _run_pipeline(self, mic_path, system_path, offsets=None, dual=False) -> None:
+    def _run_pipeline(self, mic_path, system_path, offsets=None, dual=False, *, resume=False) -> None:
         if self._busy or self._encoding or self._stopping or self.recorder.is_recording or self._worker is not None:
             return
         if AudioProfile.parse(self.audio_profile_combo.currentData()) is None:
@@ -1102,14 +1106,19 @@ class MainWindow(QMainWindow):
                 "'Ambientale stereo' prima di trascrivere e distinguere le voci.",
             )
             return
-        if not self._confirm_discard():
+        options = self._build_options()
+        if options.diarize and not self._prepare_diarization_model():
             return
+        if not resume and not self._confirm_discard():
+            return
+        self._pipeline_request = (mic_path, system_path, offsets, dual)
+        self._pending_access_error = None
         self.player.clear()
         self.progress.setValue(0)
         self._set_busy(True)
         self.status_label.setText(self._estimate(mic_path or system_path))
         self._worker = ProcessWorker(
-            mic_path, system_path, self._build_options(), offsets_s=offsets or [],
+            mic_path, system_path, options, offsets_s=offsets or [],
             dual_channel=dual,
         )
         self._worker.progress.connect(self._on_progress)
@@ -1119,9 +1128,45 @@ class MainWindow(QMainWindow):
         self._worker.stage.connect(self.stage_view.on_stage)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
+        self._worker.access_failed.connect(self._on_access_failed)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.finished.connect(lambda: setattr(self, "_worker", None))
+        self._worker.finished.connect(self._resume_pipeline_after_setup)
         self._worker.start()
+
+    # --- modello di diarizzazione e Hugging Face ----------------------------
+
+    # Sostituibile nei test per non aprire finestre modali.
+    _diarization_setup = staticmethod(ensure_diarization_model)
+
+    def _prepare_diarization_model(self, reason: dict | None = None) -> bool:
+        """True se il modello verificato e' in cache, chiedendo la configurazione se serve."""
+        if self._diarization_setup(self, reason):
+            return True
+        self.status_label.setText(
+            "Modello di diarizzazione non disponibile: operazione non avviata. "
+            "Configura Hugging Face e riprova, oppure disattiva «Distingui le voci»."
+        )
+        return False
+
+    def _on_access_failed(self, info: dict) -> None:
+        """Il worker si ferma per un problema di modello: si riprende dopo la configurazione."""
+        self._pending_access_error = info
+        self._set_busy(False)
+        self.progress.setValue(0)
+        self.status_label.setText(info.get("message", "Modello di diarizzazione non disponibile."))
+
+    def _resume_pipeline_after_setup(self) -> None:
+        info, self._pending_access_error = getattr(self, "_pending_access_error", None), None
+        request = getattr(self, "_pipeline_request", None)
+        if info is None or request is None:
+            return
+        if self._prepare_diarization_model(info):
+            self.status_label.setText("Modello pronto: l'elaborazione riprende.")
+            self._run_pipeline(*request, resume=True)
+
+    def _open_hf_settings(self) -> None:
+        HuggingFaceDialog(parent=self).exec()
 
     def _estimate(self, audio_path) -> str:
         """Quanto ci vorra' su questa macchina, detto prima di iniziare."""
@@ -1309,6 +1354,8 @@ class MainWindow(QMainWindow):
         if source is None:
             self.status_label.setText("Audio non disponibile per la revisione globale.")
             return
+        if not self._prepare_diarization_model():
+            return
         fingerprint = self.session.fingerprint()
         worker = GlobalIdentityWorker(deepcopy(self.session), source, paths.cache_dir() / "global-identity" / self.session.id, self)
         self._identity_worker = worker
@@ -1329,13 +1376,21 @@ class MainWindow(QMainWindow):
             short = len(result["review"].get("confirmed_identity_review", {}).get("suspected_regions", []))
             self.status_label.setText(f"{len(result['candidates'])} proposte globali; {short} conferme richiedono campioni puliti più lunghi.")
 
+        access_error: list[dict] = []
+
         def finished():
             self._identity_worker = None
             self._set_busy(False)
             worker.deleteLater()
+            # Modello mancante o non valido: configurazione, poi la stessa
+            # revisione riparte senza riavviare l'applicazione.
+            if access_error and self._prepare_diarization_model(access_error[0]):
+                QTimer.singleShot(0, self._review_global_identities)
 
         worker.done.connect(completed)
         worker.failed.connect(lambda message: self.status_label.setText(f"Revisione globale non completata: {message}"))
+        worker.access_failed.connect(lambda info: (access_error.append(info), self.status_label.setText(
+            f"Revisione globale sospesa: {info.get('message', '')}")))
         worker.finished.connect(finished)
         worker.start()
 
@@ -1549,7 +1604,10 @@ class MainWindow(QMainWindow):
         except ValueError as err:
             QMessageBox.warning(self, "Profilo audio obbligatorio", str(err))
             return
+        if options.diarize and not self._prepare_diarization_model():
+            return
 
+        self._pending_batch_access_error = None
         self._batch_worker = BatchProcessWorker(
             pending, options, parent=self, project_name=self.project.name
         )
@@ -1562,6 +1620,8 @@ class MainWindow(QMainWindow):
         self._batch_worker.file_failed.connect(self._on_batch_file_failed)
         self._batch_worker.done.connect(self._on_batch_done)
         self._batch_worker.failed.connect(self._on_batch_failed)
+        self._batch_worker.access_failed.connect(
+            lambda info: setattr(self, "_pending_batch_access_error", info))
         self._batch_worker.finished.connect(self._batch_worker.deleteLater)
         self._batch_worker.finished.connect(self._on_batch_finished)
 
@@ -1623,6 +1683,10 @@ class MainWindow(QMainWindow):
         self._batch_worker = None
         self._set_busy(False)
         self._update_project_ui()
+        info, self._pending_batch_access_error = getattr(self, "_pending_batch_access_error", None), None
+        if info is not None and self._prepare_diarization_model(info):
+            # I file gia' completati non sono piu' in attesa: si riprende dal primo mancante.
+            QTimer.singleShot(0, self._start_batch_processing)
 
     def _on_speaker_reassigned(self, _row: int, _speaker_id: str) -> None:
         """Correzione manuale dell'attribuzione: la voce puo' restare senza frasi."""

@@ -1,39 +1,26 @@
 """Diarizzazione (chi parla quando) con pyannote.audio.
 
-Richiede un token HuggingFace e l'accettazione delle condizioni del modello
-`pyannote/speaker-diarization-community-1` (bundle all-in-one di pyannote 4.x).
-Il token si legge dalla variabile d'ambiente HF_TOKEN o da un file `.hf_token`
-cercato nella cartella dell'app, nella cartella dati e nella home dell'utente:
-cosi' l'app funziona anche lanciata da un'altra cartella o su un altro PC.
+Il primo download di `pyannote/speaker-diarization-community-1` (bundle
+all-in-one di pyannote 4.x) richiede un token Hugging Face e l'accettazione
+delle condizioni del modello. Credenziali, verifiche e download stanno in
+`hf_access`: qui il token serve solo se il modello non e' gia' in cache.
 """
 
 from __future__ import annotations
 
 import gc
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import paths
 from .adaptation import normalize_embedding
 
 
 def read_hf_token() -> str | None:
-    """Token HF da env (HF_TOKEN/HUGGINGFACE_TOKEN) o da un file .hf_token."""
-    for var in ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        val = os.environ.get(var)
-        if val:
-            return val.strip()
-    for p in paths.hf_token_candidates():
-        try:
-            if p.is_file():
-                token = p.read_text(encoding="utf-8").strip()
-                if token:
-                    return token
-        except OSError:
-            continue
-    return None
+    """Token effettivo: variabili d'ambiente, Gestore credenziali, vecchio file .hf_token."""
+    from .hf_access import read_token
+
+    return read_token()
 
 
 @dataclass
@@ -130,10 +117,23 @@ def _speaker_embedding_map(annotation, raw_embeddings) -> dict[str, list[float]]
     return result
 
 
-def _model_path(repo: str, token: str | None) -> str:
-    """Use the complete local bundle without checking/replacing its revision."""
+def _model_path(repo: str, token: str | None, *, allow_download: bool = True) -> str:
+    """Use the complete local bundle without checking/replacing its revision.
+
+    The activated snapshot written by the model store comes first: a download
+    pinned to a commit leaves no ``refs/main``, and looking only there made a
+    freshly verified model invisible. A missing model is downloaded through
+    ``hf_access.ensure_model`` (access checks, checksums, load test), never
+    with an unverified snapshot. ``allow_download=False`` keeps the call local.
+    """
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
+
+    from .hf_access import AccessIssue, ModelAccessError, ensure_model, local_model
+
+    verified = local_model(repo)
+    if verified is not None:
+        return verified
     files = ["config.yaml", "segmentation/pytorch_model.bin", "embedding/pytorch_model.bin",
              "plda/plda.npz", "plda/xvec_transform.npz"]
     try:
@@ -142,9 +142,9 @@ def _model_path(repo: str, token: str | None) -> str:
             return str(cached)
     except LocalEntryNotFoundError:
         pass
-    if not token:
-        raise RuntimeError("Modello diarizzazione non presente completo in cache. Serve un token HuggingFace per il primo download.")
-    return snapshot_download(repo, token=token, allow_patterns=files)
+    if not allow_download:
+        raise ModelAccessError(AccessIssue.MODEL_NOT_CACHED, repo=repo)
+    return ensure_model(repo, token=token)
 
 
 class Diarizer:
@@ -159,18 +159,22 @@ class Diarizer:
 
         from ..bootstrap import install_system_certs
 
+        from .hf_access import AccessIssue, ModelAccessError
+
         install_system_certs()  # il primo load scarica i modelli da HuggingFace
-        token = token or read_hf_token()
+        # Il token (esplicito o risolto da hf_access) serve solo al download:
+        # il bundle locale si carica senza credenziali.
         model_path = Path(_model_path(self.MODEL, token))
         self.model_revision = (
             model_path.name if model_path.parent.name == "snapshots" else ""
         )
-        self._pipeline = Pipeline.from_pretrained(str(model_path), token=token)
+        try:
+            self._pipeline = Pipeline.from_pretrained(str(model_path))
+        except Exception as exc:  # noqa: BLE001 - cache presente ma non caricabile
+            raise ModelAccessError(AccessIssue.MODEL_INCOMPATIBLE, type(exc).__name__) from exc
         if self._pipeline is None:
-            raise RuntimeError(
-                "Impossibile caricare la pipeline pyannote: token non valido o "
-                "condizioni dei modelli non accettate su huggingface.co."
-            )
+            # Il bundle e' locale e completo: qui non c'entrano token o condizioni.
+            raise ModelAccessError(AccessIssue.MODEL_INCOMPATIBLE, "pipeline non caricabile")
         self._pipeline.to(torch.device(device))
 
     # Nomi leggibili dei passi interni di pyannote, per la barra di avanzamento.

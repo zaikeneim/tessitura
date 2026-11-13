@@ -100,15 +100,21 @@ def check_audio_devices() -> bool:
 
 
 def check_hf_token() -> bool:
-    from src.processing.diarize import read_hf_token
+    from src.processing.hf_access import diarization_model_ready, token_info
 
-    token = read_hf_token()
-    if token:
-        print(f"[hf]      token trovato (…{token[-4:]}) — diarizzazione disponibile")
+    # Nessun carattere del token viene stampato: solo la sua origine.
+    info = token_info()
+    cached = diarization_model_ready()
+    if info.present:
+        print(f"[hf]      token configurato — {info.describe()}")
+    else:
+        print("[hf]      nessun token Hugging Face configurato.")
+    if cached:
+        print("[hf]      modello di diarizzazione completo in cache: il token non serve.")
         return True
-    print("[hf]      token HuggingFace NON trovato — la diarizzazione non funzionera'.")
-    print("          Crea il file .hf_token nella root o imposta HF_TOKEN.")
-    return False
+    if not info.present:
+        print("          Serve per il primo download: Impostazioni -> Hugging Face, oppure HF_TOKEN.")
+    return info.present
 
 
 def main() -> int:

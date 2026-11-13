@@ -28,7 +28,8 @@ Quando Tessitura viene eseguita da un pacchetto installato (`sys.frozen == True`
 | Ruolo | Percorso Windows | Comportamento su Upgrade / Disinstallazione |
 |---|---|---|
 | **Binari applicazione** | `%LOCALAPPDATA%\Programs\Tessitura` | Aggiornato su upgrade; rimosso su disinstallazione |
-| **Configurazione e backup** | `%APPDATA%\Tessitura` (`settings.json`, `.hf_token`, `backups\`) | **Preservato** su upgrade e disinstallazione |
+| **Configurazione e backup** | `%APPDATA%\Tessitura` (`settings.json`, `backups\`) | **Preservato** su upgrade e disinstallazione |
+| **Token Hugging Face** | Gestore credenziali di Windows, voce `Tessitura/HuggingFace` | **Preservato**; si rimuove da Impostazioni → Hugging Face → Rimuovi token |
 | **Modelli AI** | `%LOCALAPPDATA%\Tessitura\models` (o cartella scelta dall'utente) | **Preservato** su upgrade e disinstallazione |
 | **Registrazioni e sessioni** | `%LOCALAPPDATA%\Tessitura\data` (o cartella scelta dall'utente) | **Preservato** su upgrade e disinstallazione |
 | **Cache API e installer** | `%LOCALAPPDATA%\Tessitura\cache` (`github_releases_cache.json`, `updates\`) | **Preservato**; pulibile senza perdita dati |
@@ -38,9 +39,9 @@ Quando Tessitura viene eseguita da un pacchetto installato (`sys.frozen == True`
 
 ## 3. Provisioning dei Modelli AI al Primo Avvio
 
-I modelli AI (`large-v3` ~3.1 GB e `pyannote/speaker-diarization-community-1` ~450 MB) **non** vengono inclusi dentro `Tessitura-Setup-{version}.exe` per mantenere l'installer snello e veloce da scaricare:
+I modelli AI (`large-v3` ~3.1 GB e `pyannote/speaker-diarization-community-1` ~33 MB) **non** vengono inclusi dentro `Tessitura-Setup-{version}.exe` per mantenere l'installer snello e veloce da scaricare:
 - Il modulo `src/processing/first_run.py` e la finestra `Impostazioni → Cartelle dati e configurazione iniziale…` (`src/gui/first_run_dialog.py`) rilevano GPU/VRAM, spazio disco disponibile e stato della cache locale.
-- L'utente può scegliere percorsi personalizzati per registrazioni e modelli AI, inserire facoltativamente il token Hugging Face (salvato in `%APPDATA%\Tessitura\.hf_token`) o rimandare il download usando subito la registrazione locale offline.
+- L'utente può scegliere percorsi personalizzati per registrazioni e modelli AI, inserire facoltativamente il token Hugging Face (salvato nel Gestore credenziali di Windows, vedi [HUGGING_FACE.md](HUGGING_FACE.md)) o rimandare il download usando subito la registrazione locale offline.
 - Una volta scaricati in `%LOCALAPPDATA%\Tessitura\models`, i modelli vengono riutilizzati offline senza necessità di connessione e non vengono riscaricati durante gli aggiornamenti dell'applicazione.
 
 ---

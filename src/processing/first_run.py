@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import os
 from pathlib import Path
 import shutil
 from typing import Any
@@ -64,15 +63,9 @@ def _disk_free_gb(target_dir: Path) -> float:
 
 
 def _has_hf_token() -> bool:
-    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN"):
-        return True
-    for candidate in paths.hf_token_candidates():
-        try:
-            if candidate.is_file() and candidate.read_text(encoding="utf-8").strip():
-                return True
-        except OSError:
-            continue
-    return False
+    from src.processing.hf_access import token_info
+
+    return token_info().present
 
 
 def _estimate_model_gb(model_id: str, include_diarization: bool = True) -> float:
@@ -151,7 +144,15 @@ def configure_user_directories(
     mark_completed: bool = True,
     config_file: Path | None = None,
 ) -> AppSettings:
-    """Persist custom models/recordings directories and optional HF token outside the install folder."""
+    """Persist custom models/recordings directories outside the install folder.
+
+    An optional HF token goes to the OS credential vault, never to a file;
+    it is validated and stored before any setting changes.
+    """
+    if hf_token is not None and hf_token.strip():
+        from src.processing.hf_access import save_token
+
+        save_token(hf_token)
     settings = load_settings(config_file)
     if models_dir is not None:
         m_str = str(models_dir).strip()
@@ -170,9 +171,6 @@ def configure_user_directories(
             settings.recordings_dir = str(r_path)
         else:
             settings.recordings_dir = None
-
-    if hf_token is not None and hf_token.strip():
-        paths.save_hf_token(hf_token.strip())
 
     if mark_completed:
         settings.first_run_completed = True

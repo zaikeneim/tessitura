@@ -285,7 +285,11 @@ def resolve_media(stored: str | None) -> Path | None:
 # --- token HuggingFace ------------------------------------------------------
 
 def hf_token_candidates() -> list[Path]:
-    """File dove cercare il token HF, in ordine di priorita'."""
+    """Vecchi file in chiaro dove cercare il token HF, in ordine di priorita'.
+
+    Solo lettura, per compatibilita': il token nuovo va nel Gestore credenziali
+    (``processing.hf_access.save_token``) e nessuna funzione lo scrive su file.
+    """
     names = (".hf_token", ".huggingface_token")
     roots = (
         config_dir(),
@@ -302,11 +306,3 @@ def hf_token_candidates() -> list[Path]:
             if p not in seen:
                 seen.append(p)
     return seen
-
-
-def save_hf_token(token: str) -> Path:
-    """Salva il token HuggingFace nella directory di configurazione utente (%APPDATA%\\Tessitura\\.hf_token)."""
-    target = config_dir() / ".hf_token"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(token.strip() + "\n", encoding="utf-8")
-    return target

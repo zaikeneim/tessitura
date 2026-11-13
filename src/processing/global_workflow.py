@@ -49,7 +49,8 @@ def extract_clean_embeddings(source, turns, output, *, device="cuda", progress=p
     old_offline = os.environ.get("HF_HUB_OFFLINE")
     os.environ["HF_HUB_OFFLINE"] = "1"
     try:
-        model_path = Path(_model_path("pyannote/speaker-diarization-community-1", None)) / "embedding" / "pytorch_model.bin"
+        model_path = Path(_model_path("pyannote/speaker-diarization-community-1", None,
+                                      allow_download=False)) / "embedding" / "pytorch_model.bin"
         model_hash = file_digest(model_path)
         source_hash = file_digest(source)
         windows = clean_identity_windows(turns)

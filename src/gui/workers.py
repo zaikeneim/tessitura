@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from ..audio.encode import merge_to_stereo_mp3
+from ..processing.hf_access import ModelAccessError, redact
 from ..processing.pipeline import PipelineOptions, process_recording
 
 
@@ -74,6 +75,9 @@ class ProcessWorker(QThread):
     stage = Signal(object)
     done = Signal(object)          # Session
     failed = Signal(str)
+    # Modello di diarizzazione non disponibile: dizionario di
+    # ModelAccessError.to_dict(), senza traceback ne' segreti.
+    access_failed = Signal(object)
 
     def __init__(self, mic_path, system_path, options: PipelineOptions, parent=None,
                  offsets_s: list[float] | None = None, dual_channel: bool = False):
@@ -96,8 +100,10 @@ class ProcessWorker(QThread):
                 on_stage=self.stage.emit,
             )
             self.done.emit(session)
+        except ModelAccessError as exc:
+            self.access_failed.emit(exc.to_dict())
         except Exception as exc:  # noqa: BLE001 - lo mostriamo nella UI
-            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
+            self.failed.emit(redact(f"{exc}\n\n{traceback.format_exc()}"))
 
 
 class CombineAudioWorker(QThread):
@@ -150,6 +156,7 @@ class BatchProcessWorker(QThread):
     file_failed = Signal(object, str)    # percorso audio, errore
     done = Signal(object)                # elenco dei percorsi elaborati
     failed = Signal(str)
+    access_failed = Signal(object)       # ModelAccessError.to_dict(): coda fermata
 
     def __init__(self, audio_paths, options: PipelineOptions, parent=None,
                  project_name: str = ""):
@@ -187,14 +194,21 @@ class BatchProcessWorker(QThread):
                         session_name=audio.stem, progress=report,
                         on_stage=lambda event, label=label: self.stage.emit(label, event),
                     )
+                except ModelAccessError as exc:
+                    # Lo stesso modello manca per tutti i file: proseguire
+                    # produrrebbe solo altri errori identici. La coda si ferma
+                    # e la finestra propone la configurazione, poi la ripresa.
+                    self.file_failed.emit(audio, exc.user_message)
+                    self.access_failed.emit(exc.to_dict())
+                    break
                 except Exception as exc:  # noqa: BLE001
                     # Un file illeggibile non deve fermare la coda: si segnala e
                     # si prosegue, altrimenti una cartella da venti registrazioni
                     # si blocca sulla prima corrotta.
-                    self.file_failed.emit(audio, f"{exc}")
+                    self.file_failed.emit(audio, redact(f"{exc}"))
                     continue
                 completed.append(audio)
                 self.file_done.emit(audio, session)
             self.done.emit(completed)
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
+            self.failed.emit(redact(f"{exc}\n\n{traceback.format_exc()}"))
