@@ -495,6 +495,19 @@ class MainWindow(QMainWindow):
         opt_row.addWidget(self.diarize_check)
         advanced_layout.addLayout(opt_row)
 
+        advanced_layout.addWidget(QLabel("Recupero avanzato delle voci"))
+        self.recovery_combo = QComboBox()
+        self.recovery_combo.setAccessibleName("Recupero avanzato delle voci")
+        self.recovery_combo.addItem("Disattivato", "off")
+        self.recovery_combo.addItem("Adattivo: regioni difficili, proposte da verificare", "adaptive")
+        self.recovery_combo.addItem("Sperimentale: verifica anche disponibilità estrazione target", "experimental")
+        self.recovery_combo.setToolTip(
+            "Seconda passata locale opzionale, entro limiti di durata e regioni. "
+            "Confronta l'audio e propone interventi da ascoltare nella timeline; "
+            "il testo esistente resta conservato. Nessun download automatico."
+        )
+        advanced_layout.addWidget(self.recovery_combo)
+
         opt_row2 = QVBoxLayout()
         model_row = QHBoxLayout()
         model_row.addWidget(QLabel("Modello trascrizione:"))
@@ -904,6 +917,7 @@ class MainWindow(QMainWindow):
             initial_prompt=initial_prompt,
             analysis_mode="safe",
             known_speaker_profiles=known_profiles,
+            recovery_mode=self.recovery_combo.currentData(),
             strategy=getattr(self, "_pipeline_strategy", "standard") if for_recording else "standard",
             headphones_confirmed=getattr(self, "_headphones_confirmed", True) if for_recording else None,
             **((self._last_recording_config or {}) if for_recording else {}),
@@ -1168,6 +1182,17 @@ class MainWindow(QMainWindow):
     def _open_hf_settings(self) -> None:
         HuggingFaceDialog(parent=self).exec()
 
+    def _show_saved_stages(self, session) -> None:
+        """Le fasi salvate (conteggio profili incluso) restano visibili alla riapertura."""
+        rows = (getattr(session, "provenance", None) or {}).get("processing_stages")
+        if self.stage_view.show_saved(rows):
+            self.stage_toggle.show()
+            self.stage_toggle.setChecked(True)
+        else:
+            self.stage_view.clear()
+            self.stage_toggle.hide()
+            self.stage_toggle.setChecked(False)
+
     def _estimate(self, audio_path) -> str:
         """Quanto ci vorra' su questa macchina, detto prima di iniziare."""
         model = self.model_combo.currentText()
@@ -1212,6 +1237,14 @@ class MainWindow(QMainWindow):
             f"{prefix}Completato: {len(session.segments)} segmenti, "
             f"{len(session.speaker_ids())} voci (lingua: {session.language})."
         )
+        recovery = session.provenance.get("advanced_recovery") or {}
+        counts = recovery.get("counts") or {}
+        if counts:
+            self.status_label.setText(self.status_label.text() +
+                f" Recupero: {counts['detected']} ipotesi, {counts['processed']} regioni elaborate, "
+                f"{counts['candidates']} proposte da verificare, {counts['unresolved']} regioni irrisolte.")
+        if session.provenance.get("advanced_recovery_error"):
+            self.status_label.setText(self.status_label.text() + " Recupero avanzato non completato; trascrizione conservata.")
         synchronization = (session.capture_manifest or {}).get("synchronization", {})
         if synchronization.get("review_required"):
             self.status_label.setText(self.status_label.text() + " Sincronizzazione incerta: verifica le tracce originali.")
@@ -1446,7 +1479,7 @@ class MainWindow(QMainWindow):
         self._update_edit_actions()
         for widget in (self.mic_check, self.sys_check, self.mic_combo, self.sys_combo,
                        self.mp3_check, self.model_combo, self.lang_combo,
-                       self.denoise_check, self.diarize_check,
+                       self.denoise_check, self.diarize_check, self.recovery_combo,
                        self.speakers_spin,
                        self.audio_profile_combo, self.glossary_edit,
                        self.model_settings_button):
@@ -1792,6 +1825,7 @@ class MainWindow(QMainWindow):
         self._set_audio_profile(AudioProfile.parse(session.audio_profile))
         self._display_transcript()
         self.speakers.set_session(session)
+        self._show_saved_stages(session)
         self._dirty = False
         self.setWindowTitle("Tessitura — " + session.name)
         self._describe_session()

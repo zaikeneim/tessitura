@@ -466,6 +466,14 @@ class SpeakerTimelineView(QWidget):
         self.candidate_detail.setMaximumHeight(130)
         layout.addWidget(self.candidate_detail)
         self.accept_candidate_btn = self._button(layout, "Accetta come evento distinto", self._accept_candidate)
+        self._button(layout, "Rifiuta candidato", self._reject_candidate)
+        self.candidate_views = QComboBox()
+        self.candidate_views.setAccessibleName("Confronto audio del candidato")
+        layout.addWidget(self.candidate_views)
+        from .audio_player import AudioPlayer
+        self.candidate_player = AudioPlayer(self.inspector)
+        layout.addWidget(self.candidate_player)
+        self._button(layout, "Ascolta vista selezionata", self._play_candidate, edits=False)
         self.message = QLabel("")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
@@ -818,8 +826,26 @@ class SpeakerTimelineView(QWidget):
         self.candidate_detail.setPlainText(json.dumps(candidate, ensure_ascii=False, indent=2) if candidate else "")
         assignment = bool(candidate and candidate.get("kind") == "speaker_assignment")
         self.accept_candidate_btn.setText("Accetta attribuzione proposta" if assignment else "Accetta come evento distinto")
+        self.candidate_views.clear()
+        self.candidate_player.clear()
         if candidate:
             event = candidate.get("event") or candidate.get("event_snapshot", {})
+            if not assignment:
+                self.speaker_combo.setCurrentIndex(max(0, self.speaker_combo.findData(None)))
+            provenance = event.get("asr_provenance", {})
+            context = provenance.get("context_interval", [0., 0.])
+            original = provenance.get("original_context_audio")
+            if original:
+                self.candidate_views.addItem("Originale: canali nativi", {"path": original, "offset_s": context[0]})
+            names = {"original": "Originale mono", "normalized": "Normalizzazione Tessitura",
+                     "bounded_gain": "Gain conservativo", "acoustic_separation": "Sorgente separata",
+                     "enhanced_separation": "Gain e separazione acustica"}
+            for view in provenance.get("comparison_views", []):
+                label = names.get(view["strategy"], view["strategy"])
+                self.candidate_views.addItem(f"{label} · traccia {view['source_index'] + 1}", view)
+            if not provenance.get("comparison_views") and provenance.get("candidate_audio"):
+                self.candidate_views.addItem("Audio candidato", {"path": provenance["candidate_audio"],
+                    "offset_s": provenance.get("candidate_audio_offset_s", 0.)})
             if assignment:
                 event_id = candidate.get("proposed_event_id")
                 if event_id:
@@ -843,6 +869,24 @@ class SpeakerTimelineView(QWidget):
             candidate_id = item.data(Qt.UserRole)["candidate_id"]
             speaker_id = self.speaker_combo.currentData()
             self._run_edit(lambda: self.controller.accept_candidate(candidate_id, speaker_id))
+
+    def _reject_candidate(self) -> None:
+        item = self.candidates.currentItem()
+        if item:
+            self._run_edit(lambda: self.controller.reject_candidate(item.data(Qt.UserRole)["candidate_id"]))
+
+    def _play_candidate(self) -> None:
+        view = self.candidate_views.currentData()
+        if not view:
+            return
+        from ..paths import resolve_media
+        path = resolve_media(view["path"])
+        if path is None or not path.is_file():
+            self.message.setText("Audio candidato non più disponibile: ritrascrivi la regione.")
+            return
+        self.candidate_player.load(path)
+        offset = view.get("offset_s", 0.)
+        self.candidate_player.play_region(max(0., self._region[0] - offset), max(0., self._region[1] - offset))
 
     def _on_speakers_changed(self, _names: dict) -> None:
         self._refresh_speakers()

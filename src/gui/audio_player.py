@@ -75,6 +75,7 @@ class AudioPlayer(QWidget):
 
     def clear(self) -> None:
         self._region_end_ms = None
+        self._pending_seek_ms = 0
         self._player.stop()
         self._player.setSource(QUrl())
         self._slider.setRange(0, 0)
@@ -221,7 +222,9 @@ class AudioPlayer(QWidget):
 
     def seek_seconds(self, seconds: float) -> None:
         self._region_end_ms = None
-        self._player.setPosition(int(seconds * 1000))
+        target_ms = max(0, int(seconds * 1000))
+        self._pending_seek_ms = target_ms if self._player.duration() < target_ms else 0
+        self._player.setPosition(target_ms)
         if self._player.playbackState() != QMediaPlayer.PlayingState:
             self._player.play()
 

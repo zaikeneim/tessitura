@@ -43,16 +43,46 @@ class SpeakerTracksResult:
 
     @property
     def separated(self) -> bool:
+        """Ci sono tracce per parlante utilizzabili (separate *o* ritagliate).
+
+        Serve solo all'instradamento. Per dire se un modello ha davvero
+        separato le voci acusticamente usare ``acoustic``: un ritaglio per turni
+        di una miscela a due voci resta una miscela.
+        """
         return self.status in ("separated", "sliced") and len(self.tracks) >= 2
+
+    @property
+    def acoustic(self) -> bool:
+        """Un separatore acustico ha prodotto le tracce e i guardrail le hanno accettate."""
+        return self.status == "separated" and len(self.tracks) >= 2
+
+    @property
+    def method(self) -> str:
+        if self.acoustic:
+            return "acoustic_separation"
+        if self.status == "sliced" and len(self.tracks) >= 2:
+            return "diarization_slicing"
+        return "none"
+
+    def describe(self) -> str:
+        """Descrizione per le fasi di elaborazione, senza confondere i due metodi."""
+        if self.method == "acoustic_separation":
+            return f"Separazione acustica: {len(self.tracks)} tracce"
+        if self.method == "diarization_slicing":
+            return (f"Ritaglio per turni di diarizzazione: {len(self.tracks)} tracce "
+                    "(non è separazione acustica; il parlato sovrapposto resta nella miscela)")
+        return "Nessuna traccia per parlante"
 
     def as_metadata(self) -> dict[str, Any]:
         """Traccia nella sessione cosa e' successo davvero alla separazione."""
         payload = {
+            **self.metrics,
             "separation_status": self.status,
             "separation_decision": self.decision,
             "track_count": len(self.tracks),
+            "method": self.method,
+            "acoustic_separation": self.acoustic,
         }
-        payload.update(self.metrics)
         return payload
 
 

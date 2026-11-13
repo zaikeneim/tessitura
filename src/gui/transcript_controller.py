@@ -210,6 +210,16 @@ class TranscriptController(QObject):
         self._notify_changed()
         return True
 
+    def reject_candidate(self, candidate_id: str) -> bool:
+        """Reject a proposal without changing any canonical event."""
+        if self._read_only or self._session is None:
+            return False
+        from ..models.timeline import TimelineEditor
+        result = TimelineEditor(self._session).reject_candidate(candidate_id)
+        if result:
+            self._notify_changed()
+        return result
+
     def undo(self) -> bool:
         """Annulla l'ultima modifica atomica."""
         if self._read_only or self._session is None:

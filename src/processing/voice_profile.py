@@ -403,3 +403,42 @@ def reconcile_window_speakers(
         local_to_global=local_to_global,
         evidence=evidence,
     )
+
+
+# Clean speech a profile needs before a target-speaker extractor could use it
+# as enrollment: the same threshold as confirmed global identities (three clean
+# samples of at least three seconds). Indicative only: turn time may include
+# overlap, and no extractor is installed by default.
+TSE_MIN_SPEECH_S = 9.0
+
+
+def format_profile_count(count: int) -> str:
+    """Italian wording of the number of profiles actually created."""
+    count = int(count)
+    return "1 profilo creato" if count == 1 else f"{count} profili creati"
+
+
+def profile_summary(profiles: Mapping[str, Any] | None) -> dict:
+    """Counts derived from the returned profile collection, never from settings.
+
+    Accepts VoiceProfile objects or their dictionaries. No model inference.
+    """
+    items = list((profiles or {}).values())
+
+    def value(profile, name, default=None):
+        return profile.get(name, default) if isinstance(profile, Mapping) else getattr(profile, name, default)
+
+    with_embedding = [p for p in items if normalize_embedding(value(p, "embedding"))]
+    return {
+        "profiles": len(items),
+        "with_embedding": len(with_embedding),
+        "known_matches": sum(1 for p in items if value(p, "is_known_profile", False)),
+        "tse_eligible": sum(1 for p in with_embedding
+                            if value(p, "metadata", {}).get("tse_enrollment_verified") is True),
+    }
+
+
+def profile_stage_detail(profiles: Mapping[str, Any] | None) -> tuple[str, dict]:
+    """Stage detail (visible count) and extra diagnostics for the tooltip."""
+    summary = profile_summary(profiles)
+    return format_profile_count(summary["profiles"]), summary

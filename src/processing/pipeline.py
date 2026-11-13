@@ -39,7 +39,8 @@ from .alignment import align_segments
 from .audio_profile import AudioProfile
 from .diarize import Turn
 from .transcript_review import review_labels
-from .progress import StageReporter, recording_stages
+from .voice_profile import profile_stage_detail
+from .progress import RECOVERY_STAGES, StageReporter, recording_stages
 
 # Compatibilita': la funzione di merge vive ora in merge.py.
 merge_transcript_and_diarization = merge.merge_transcript_and_diarization
@@ -99,6 +100,8 @@ class PipelineOptions:
     mic_single_speaker_verified: bool = False
     echo_cancellation: bool = False
     recording_metadata: dict | None = None
+    # Off preserves the first pass. Enabled modes append review proposals only.
+    recovery_mode: str = "off"  # "off" | "adaptive" | "experimental"
 
 
 # Fasi interne di pyannote, per stimare l'avanzamento prima di averle viste tutte.
@@ -147,6 +150,24 @@ def _attach_recording_metadata(session: Session, options: PipelineOptions) -> No
         }
     if options.recording_metadata:
         session.provenance["recording"] = copy.deepcopy(options.recording_metadata)
+
+
+def _recover_session(session, source, options, work, stages):
+    """An optional failed second pass must never discard a completed baseline."""
+    if options.recovery_mode == "off":
+        return
+    from .region_recovery import recover_session_regions
+    try:
+        recover_session_regions(source, session, work, mode=options.recovery_mode,
+                                device=options.device, model_size=options.model_size,
+                                initial_prompt=options.initial_prompt, stages=stages)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Recupero avanzato non completato; baseline conservata")
+        session.provenance["advanced_recovery_error"] = str(exc)
+        stages.fail_running(exc)
+        for row in stages.snapshot():
+            if row["stage_id"].startswith("recovery_") and row["status"] == "pending":
+                stages.skip(row["stage_id"], "Non disponibile: seconda passata interrotta; baseline conservata")
 
 
 def _validate_profile_inputs(
@@ -227,6 +248,8 @@ def process_recording(
     stages = StageReporter(recording_stages(opts, source=source_strategy), progress, on_stage)
     with stages.guard():
         stages.start("validate")
+        if opts.recovery_mode not in ("off", "adaptive", "experimental"):
+            raise ValueError("recovery_mode deve essere off, adaptive o experimental")
         if not 0.0 <= float(opts.denoise_strength) <= 1.0:
             raise ValueError("denoise_strength deve essere compreso tra 0 e 1.")
         if opts.quality_retries < 0:
@@ -312,7 +335,14 @@ def process_recording(
                 synchronization=synchronized.report,
                 stages=stages,
             )
-            stages.start("finalize")
+            stages.start("profiles")
+            from .voice_profile import enrich_voice_profiles_with_transcript
+            dual_profiles = enrich_voice_profiles_with_transcript(
+                {}, utterances,
+                total_duration=max((u.end_s for u in utterances), default=0.0),
+            )
+            profile_detail, profile_extra = profile_stage_detail(dual_profiles)
+            stages.complete("profiles", detail=profile_detail, extra=profile_extra)
             stored_meta = _portable_source_metadata(meta)
             session = Session(
                 name=session_name or "Sessione",
@@ -333,13 +363,6 @@ def process_recording(
                     "suppressed_bleed_count": meta.get("suppressed_bleed_count", 0),
                 },
             )
-            from .voice_profile import enrich_voice_profiles_with_transcript
-            dual_profiles = enrich_voice_profiles_with_transcript(
-                {},
-                session.utterances,
-                total_duration=session.duration,
-                speaker_names=session.speaker_names,
-            )
             session.diarization["voice_profiles"] = {
                 spk: p.to_dict() for spk, p in dual_profiles.items()
             }
@@ -356,9 +379,11 @@ def process_recording(
                 if system_path:
                     session.audio.system = paths.to_portable(system_path)
 
+            _recover_session(session, mixed, opts, work, stages)
+            stages.start("finalize")
             _attach_recording_metadata(session, opts)
             stages.complete("finalize")
-            stages.assert_complete()
+            stages.assert_complete(allow_failed=[key for key, _ in RECOVERY_STAGES])
             session.provenance["processing_stages"] = stages.snapshot()
             return session
 
@@ -372,17 +397,18 @@ def process_recording(
             stages.start("separation")
             report("Separazione delle voci...", 0.2)
             tracks = extract_speaker_tracks(mixed, num_speakers=opts.num_speakers or 2)
-            stages.complete("separation", warning=None if tracks.separated else "Separazione non disponibile: percorso standard")
+            stages.complete("separation", detail=tracks.describe(),
+                            warning=None if tracks.separated else "Separazione non disponibile: percorso standard")
             if tracks.separated:
                 stages.skip("denoise", "Tracce separate trascritte senza denoise")
                 stages.skip("diarization", "Identità dalla separazione delle tracce")
-                stages.skip("profiles", "Profili non previsti da questa strategia")
+                detail, extra = profile_stage_detail({})
+                stages.skip("profiles", f"Non necessario: profili non previsti; {detail}", extra=extra)
                 if opts.diarize and opts.profile_first:
                     stages.skip("profile_separation", "Separazione già riuscita")
                 utterances, segments, detected_lang, meta = transcribe_speaker_tracks(
                     tracks, options=opts, progress=report, work_dir=work, stages=stages
                 )
-                stages.start("finalize")
                 session = Session(
                     name=session_name or "Sessione",
                     language=detected_lang,
@@ -400,9 +426,11 @@ def process_recording(
                     session.audio.mic = paths.to_portable(mic_path)
                 if system_path:
                     session.audio.system = paths.to_portable(system_path)
+                _recover_session(session, sources[0] if len(sources) == 1 and not any(offsets_s or []) else mixed, opts, work, stages)
+                stages.start("finalize")
                 _attach_recording_metadata(session, opts)
                 stages.complete("finalize")
-                stages.assert_complete()
+                stages.assert_complete(allow_failed=[key for key, _ in RECOVERY_STAGES])
                 session.provenance["processing_stages"] = stages.snapshot()
                 return session
             separation_note = tracks.as_metadata()
@@ -488,7 +516,8 @@ def process_recording(
                 prefix = f"Partecipanti: {names_str}. "
                 effective_prompt = (prefix + effective_prompt) if effective_prompt else prefix.strip()
 
-            stages.complete("profiles")
+            profile_detail, profile_extra = profile_stage_detail(voice_profiles)
+            stages.complete("profiles", detail=profile_detail, extra=profile_extra)
             # FASE B: Se sono presenti più voci, estrai le voci in file separati e trascrivi ciascuna
             speaker_ids = sorted(list({t.speaker for t in diarization.turns if getattr(t, "speaker", None)}))
             separation_stage = "profile_separation" if opts.strategy == "speaker_isolated" else "separation"
@@ -503,7 +532,8 @@ def process_recording(
                     turns=diarization.turns,
                     num_speakers=len(speaker_ids),
                 )
-                stages.complete(separation_stage, warning=None if tracks_result.separated else "Separazione non disponibile: ASR completo")
+                stages.complete(separation_stage, detail=tracks_result.describe(),
+                                warning=None if tracks_result.separated else "Separazione non disponibile: ASR completo")
                 if tracks_result.separated:
                     utterances, segments, detected_lang, meta = transcribe_speaker_tracks(
                         tracks_result,
@@ -512,7 +542,6 @@ def process_recording(
                         work_dir=work,
                         stages=stages,
                     )
-                    stages.start("finalize")
                     utterances = reconcile_utterances(utterances)
                     segments = reconcile_segments(segments)
 
@@ -579,9 +608,11 @@ def process_recording(
                     if system_path:
                         session.audio.system = paths.to_portable(system_path)
 
+                    _recover_session(session, sources[0] if len(sources) == 1 and not any(offsets_s or []) else mixed, opts, work, stages)
+                    stages.start("finalize")
                     _attach_recording_metadata(session, opts)
                     stages.complete("finalize")
-                    stages.assert_complete()
+                    stages.assert_complete(allow_failed=[key for key, _ in RECOVERY_STAGES])
                     session.provenance["processing_stages"] = stages.snapshot()
                     return session
 
@@ -637,7 +668,9 @@ def process_recording(
             stages.aligned("alignment", alignment_report)
         else:
             if opts.strategy != "speaker_isolated":
-                stages.skip("separation", "Percorso standard senza separazione")
+                stages.skip("separation", "Disattivato: nessuna separazione sull'intera registrazione "
+                            "(il confronto misurato non ha mostrato vantaggi); la separazione selettiva "
+                            "sulle regioni difficili fa parte del recupero avanzato")
             # Percorso standard: Trascrizione Whisper full-context -> Allineamento -> Diarizzazione
             stages.start("asr")
             report("Trascrizione: preparazione modello...", 0.2)
@@ -733,10 +766,12 @@ def process_recording(
                     spk: p.name for spk, p in voice_profiles.items() if p.name and p.is_known_profile
                 }
 
-                stages.complete("profiles")
+                profile_detail, profile_extra = profile_stage_detail(voice_profiles)
+                stages.complete("profiles", detail=profile_detail, extra=profile_extra)
             else:
                 stages.skip("diarization", "Diarizzazione disattivata")
-                stages.skip("profiles", "Diarizzazione disattivata")
+                detail, extra = profile_stage_detail(voice_profiles)
+                stages.skip("profiles", f"Disattivato: diarizzazione; {detail}", extra=extra)
 
         stages.start("merge")
         # 5. Merge parola -> voce, guidato dai profili vocali e autocorrezione
@@ -835,7 +870,6 @@ def process_recording(
         segments = merge.utterances_to_segments(utterances)
 
         stages.complete("reconstruct")
-        stages.start("finalize")
         session = Session(
             name=session_name or "Sessione",
             language=detected_lang,
@@ -917,8 +951,10 @@ def process_recording(
         session.provenance["intermediate_outputs"] = references
         session.provenance["diarization_scope"] = "entire_recording"
         session.provenance["reconstruction_policy"] = "preserve_words_and_unresolved_activity"
+        _recover_session(session, sources[0] if len(sources) == 1 and not any(offsets_s or []) else mixed, opts, work, stages)
+        stages.start("finalize")
         _attach_recording_metadata(session, opts)
         stages.complete("finalize")
-        stages.assert_complete()
+        stages.assert_complete(allow_failed=[key for key, _ in RECOVERY_STAGES])
         session.provenance["processing_stages"] = stages.snapshot()
         return session

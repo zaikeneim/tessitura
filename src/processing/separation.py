@@ -43,7 +43,15 @@ class SeparationResult:
     metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        def finite(value):
+            if isinstance(value, (float, np.floating)):
+                return float(value) if math.isfinite(value) else None
+            if isinstance(value, dict):
+                return {key: finite(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [finite(item) for item in value]
+            return value
+        return finite({
             "region_id": self.region_id,
             "num_tracks": len(self.tracks),
             "track_qualities": [round(q, 4) for q in self.track_qualities],
@@ -51,7 +59,7 @@ class SeparationResult:
             "status": self.status,
             "decision": self.decision,
             "metrics": dict(self.metrics),
-        }
+        })
 
 
 def cross_correlation(t1: np.ndarray, t2: np.ndarray) -> float:
@@ -66,6 +74,54 @@ def cross_correlation(t1: np.ndarray, t2: np.ndarray) -> float:
     c = np.corrcoef(s1, s2)
     val = float(c[0, 1])
     return val if math.isfinite(val) else 0.0
+
+
+def _track_diagnostics(tracks: list[np.ndarray], raw_track: np.ndarray) -> dict[str, Any]:
+    """Extra evidence for review; decisions stay with the guardrails above.
+
+    Activity is measured on 20 ms frames, envelope correlation on frame levels:
+    less sensitive than waveform correlation to the phase and delay changes a
+    separator introduces. None of this proves that words were preserved.
+    """
+    frame = 320
+    def envelope(signal):
+        count = len(signal) // frame
+        if count == 0:
+            return np.zeros(0)
+        blocks = np.asarray(signal[: count * frame], dtype=np.float64).reshape(count, frame)
+        return np.sqrt(np.mean(blocks ** 2, axis=1))
+    raw_env = envelope(raw_track)
+    floor = float(np.percentile(raw_env, 10)) if raw_env.size else 0.0
+    activity = []
+    envelopes = []
+    for track in tracks:
+        env = envelope(track)
+        envelopes.append(env)
+        activity.append(round(float(np.mean(env > max(floor * 2.0, 10 ** (-45 / 20)))), 4) if env.size else 0.0)
+    env_corr = None
+    if len(envelopes) >= 2 and min(e.size for e in envelopes[:2]) > 2:
+        size = min(e.size for e in envelopes[:2])
+        a, b = envelopes[0][:size], envelopes[1][:size]
+        if a.std() > 1e-9 and b.std() > 1e-9:
+            env_corr = round(float(np.corrcoef(a, b)[0, 1]), 4)
+    return {"track_activity": activity, "envelope_correlation": env_corr,
+            "track_levels_dbfs": [round(rms_dbfs(t), 2) for t in tracks]}
+
+
+def _backend_provenance(separator) -> dict[str, Any]:
+    info: dict[str, Any] = {"backend": getattr(separator, "name", ""),
+                            "model": getattr(separator, "model_name", "")}
+    path = getattr(separator, "model_path", None)
+    if path is not None:
+        from .separation_backends import manifest_entry
+        entry = manifest_entry(path)
+        info["model_sha256"] = entry.get("sha256", "")
+        info["model_source"] = entry.get("source", "")
+    try:
+        info["providers"] = separator.resolve_providers()
+    except Exception:  # noqa: BLE001 - provenance only
+        pass
+    return info
 
 
 def _fallback_raw(
@@ -145,6 +201,7 @@ def separate_region(
     raw_track = segment if segment.ndim == 1 else segment.mean(axis=1)
 
     candidate_tracks: list[np.ndarray] = []
+    provenance: dict[str, Any] = {}
     delay_comp = 0.0
 
     if backend == "simulated_split_test" and segment.ndim == 2:
@@ -162,6 +219,7 @@ def separate_region(
                 metrics={"backend": separator.name},
             )
 
+        provenance = _backend_provenance(separator)
         expected = num_speakers or (len(profiles) if profiles else 2)
         try:
             produced = separator.separate_region(raw_track, sr, num_speakers=expected)
@@ -176,6 +234,11 @@ def separate_region(
             )
 
         candidate_tracks = [np.asarray(track, dtype=np.float32) for track in produced]
+        if any(track.ndim != 1 or not np.isfinite(track).all()
+               or abs(track.size - raw_track.size) > max(1, round(sr * .02)) for track in candidate_tracks):
+            return _fallback_raw(region, raw_track, "invalid_track_samples_or_timing", metrics=provenance)
+        if candidate_tracks:
+            provenance.update(_track_diagnostics(candidate_tracks, raw_track))
         if len(candidate_tracks) < 2:
             return _fallback_raw(
                 region,
@@ -196,7 +259,7 @@ def separate_region(
                 delay_compensation_s=0.0,
                 status="fallback_raw",
                 decision="rejected_duplicate",
-                metrics={"cross_correlation": round(corr, 4), "threshold": duplicate_threshold},
+                metrics={"cross_correlation": round(corr, 4), "threshold": duplicate_threshold, **provenance},
             )
 
     qualities: list[float] = []
@@ -212,7 +275,7 @@ def separate_region(
                 delay_compensation_s=0.0,
                 status="fallback_raw",
                 decision="rejected_energy_collapse",
-                metrics={"track_index": i, "level_dbfs": round(level, 2)},
+                metrics={"track_index": i, "level_dbfs": round(level, 2), **provenance},
             )
         # Protezione anti-clipping
         peak = float(np.max(np.abs(tr))) if tr.size else 0.0
@@ -236,6 +299,7 @@ def separate_region(
             metrics={
                 "speech_loss_db": round(speech_loss_db, 2),
                 "threshold_db": speech_loss_threshold_db,
+                **provenance,
             },
         )
 
@@ -246,5 +310,5 @@ def separate_region(
         delay_compensation_s=delay_comp,
         status="success",
         decision="accepted",
-        metrics={"num_tracks": len(validated_tracks)},
+        metrics={"num_tracks": len(validated_tracks), **provenance},
     )

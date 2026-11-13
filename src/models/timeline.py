@@ -156,8 +156,16 @@ class TimelineEditor:
             candidate["status"] = "accepted"
             self._finish()
             return event
-        self.session.begin_edit("Accetta candidato come evento distinto")
         event = Utterance.from_dict(deepcopy(candidate["event"]))
+        normalized = " ".join(event.text.casefold().split()).strip(" .?!,…")
+        digest = event.asr_provenance.get("source_sha256")
+        if digest and any(u.processing_state == "reviewed" and u.speaker_id == speaker_id
+                          and u.asr_provenance.get("source_sha256") == digest
+                          and " ".join(u.text.casefold().split()).strip(" .?!,…") == normalized
+                          and u.start_s < event.end_s and u.end_s > event.start_s
+                          for u in self.session.utterances):
+            raise ValueError("Contenuto già accettato per questa voce e regione; confronta le alternative.")
+        self.session.begin_edit("Accetta candidato come evento distinto")
         event.utterance_id = uuid.uuid4().hex
         event.speaker_id = speaker_id
         event.record_user_correction("accept_candidate", candidate_id, event.event_id)
@@ -167,3 +175,11 @@ class TimelineEditor:
         candidate["accepted_event_id"] = event.event_id
         self._finish()
         return event
+
+    def reject_candidate(self, candidate_id) -> bool:
+        candidate = next(c for c in self.session.recovery_candidates if c["candidate_id"] == candidate_id)
+        if candidate.get("status") != "proposed":
+            raise ValueError("Candidato già esaminato.")
+        self.session.begin_edit("Rifiuta candidato di recupero")
+        candidate["status"] = "rejected"
+        return True
